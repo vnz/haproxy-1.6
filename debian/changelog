@@ -1,0 +1,5 @@
+PACKAGE (1:1.6.1-1) unstable; urgency=medium
+
+  * Upstream release haproxy 1.6.1
+
+ -- vnz <vincent.leraitre@teads.tv>  Tue, 27 Oct 2015 14:38:46 +0100
