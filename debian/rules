@@ -1,0 +1,43 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+# This file was originally written by Joey Hess and Craig Small.
+# As a special exception, when this file is copied by dh-make into a
+# dh-make output file, you may use that output file without restriction.
+# This special exception was added by Craig Small in version 0.37 of dh-make.
+
+export DH_VERBOSE=1
+
+export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
+
+MAKEARGS=DESTDIR=debian/haproxy \
+         PREFIX=/usr \
+         IGNOREGIT=true \
+         MANDIR=/usr/share/man \
+         DOCDIR=/usr/share/doc/haproxy \
+         TARGET=linux2628 \
+         USE_PCRE=1 \
+         USE_STATIC_PCRE=1 \
+         USE_OPENSSL=1 \
+         USE_LUA=1 \
+         USE_TFO=1 \
+         USE_NS=1 \
+         USE_ZLIB=1
+
+MAKEARGS += CFLAGS="$(shell dpkg-buildflags --get CFLAGS) $(shell dpkg-buildflags --get CPPFLAGS)"
+MAKEARGS += LDFLAGS="$(shell dpkg-buildflags --get LDFLAGS)"
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	make $(MAKEARGS)
+
+override_dh_auto_install:
+	make $(MAKEARGS) install
+	cp README debian/haproxy/usr/share/doc/haproxy
+	dh_installchangelogs CHANGELOG
+	mkdir -p debian/haproxy/etc/haproxy
+
+override_dh_installinit:
+	dh_installinit --no-start
+
