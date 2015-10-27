@@ -1,4 +1,4 @@
-PACKAGE (1:1.6.1-1) unstable; urgency=medium
+haproxy (1:1.6.1-1) unstable; urgency=medium
 
   * Upstream release haproxy 1.6.1
 
