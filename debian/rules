@@ -17,6 +17,7 @@ MAKEARGS=DESTDIR=debian/haproxy \
          TARGET=linux2628 \
          USE_PCRE=1 \
          USE_STATIC_PCRE=1 \
+         USE_PCRE_JIT=1 \
          USE_OPENSSL=1 \
          USE_LUA=1 \
          USE_TFO=1 \
