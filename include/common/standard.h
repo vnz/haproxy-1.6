@@ -813,10 +813,10 @@ static inline int set_host_port(struct sockaddr_storage *addr, int port)
 }
 
 /* Return true if IPv4 address is part of the network */
-extern int in_net_ipv4(struct in_addr *addr, struct in_addr *mask, struct in_addr *net);
+extern int in_net_ipv4(const void *addr, const struct in_addr *mask, const struct in_addr *net);
 
 /* Return true if IPv6 address is part of the network */
-extern int in_net_ipv6(struct in6_addr *addr, struct in6_addr *mask, struct in6_addr *net);
+extern int in_net_ipv6(const void *addr, const struct in6_addr *mask, const struct in6_addr *net);
 
 /* Map IPv4 adress on IPv6 address, as specified in RFC 3513. */
 extern void v4tov6(struct in6_addr *sin6_addr, struct in_addr *sin_addr);
@@ -830,9 +830,6 @@ char *human_time(int t, short hz_div);
 
 extern const char *monthname[];
 
-/* numeric timezone (that is, the hour and minute offset from UTC) */
-char localtimezone[6];
-
 /* date2str_log: write a date in the format :
  * 	sprintf(str, "%02d/%s/%04d:%02d:%02d:%02d.%03d",
  *		tm.tm_mday, monthname[tm.tm_mon], tm.tm_year+1900,
@@ -843,6 +840,13 @@ char localtimezone[6];
  */
 char *date2str_log(char *dest, struct tm *tm, struct timeval *date, size_t size);
 
+/* Return the GMT offset for a specific local time.
+ * Both t and tm must represent the same time.
+ * The string returned has the same format as returned by strftime(... "%z", tm).
+ * Offsets are kept in an internal cache for better performances.
+ */
+const char *get_gmt_offset(time_t t, struct tm *tm);
+
 /* gmt2str_log: write a date in the format :
  * "%02d/%s/%04d:%02d:%02d:%02d +0000" without using snprintf
  * return a pointer to the last char written (\0) or
@@ -852,10 +856,11 @@ char *gmt2str_log(char *dst, struct tm *tm, size_t size);
 
 /* localdate2str_log: write a date in the format :
  * "%02d/%s/%04d:%02d:%02d:%02d +0000(local timezone)" without using snprintf
+ * Both t and tm must represent the same time.
  * return a pointer to the last char written (\0) or
  * NULL if there isn't enough space.
  */
-char *localdate2str_log(char *dst, struct tm *tm, size_t size);
+char *localdate2str_log(char *dst, time_t t, struct tm *tm, size_t size);
 
 /* Dynamically allocates a string of the proper length to hold the formatted
  * output. NULL is returned on error. The caller is responsible for freeing the
@@ -1004,8 +1009,7 @@ static inline unsigned char utf8_return_length(unsigned char code)
  * the whole code is optimized out. In little endian, with a decent compiler,
  * a few bswap and 2 shifts are left, which is the minimum acceptable.
  */
-#ifndef htonll
-static inline unsigned long long htonll(unsigned long long a)
+static inline unsigned long long my_htonll(unsigned long long a)
 {
 	union {
 		struct {
@@ -1016,15 +1020,12 @@ static inline unsigned long long htonll(unsigned long long a)
 	} w = { .by64 = a };
 	return ((unsigned long long)htonl(w.by32.w1) << 32) | htonl(w.by32.w2);
 }
-#endif
 
 /* Turns 64-bit value <a> from network byte order to host byte order. */
-#ifndef ntohll
-static inline unsigned long long ntohll(unsigned long long a)
+static inline unsigned long long my_ntohll(unsigned long long a)
 {
-	return htonll(a);
+	return my_htonll(a);
 }
-#endif
 
 /* returns a 64-bit a timestamp with the finest resolution available. The
  * unit is intentionally not specified. It's mostly used to compare dates.
@@ -1044,5 +1045,24 @@ static inline unsigned long long rdtsc()
 	return tv.tv_sec * 1000000 + tv.tv_usec;
 }
 #endif
+
+/* append a copy of string <str> (in a wordlist) at the end of the list <li>
+ * On failure : return 0 and <err> filled with an error message.
+ * The caller is responsible for freeing the <err> and <str> copy
+ * memory area using free()
+ */
+struct list;
+int list_append_word(struct list *li, const char *str, char **err);
+
+/* same as realloc() except that ptr is also freed upon failure */
+static inline void *my_realloc2(void *ptr, size_t size)
+{
+	void *ret;
+
+	ret = realloc(ptr, size);
+	if (!ret && size)
+		free(ptr);
+	return ret;
+}
 
 #endif /* _COMMON_STANDARD_H */

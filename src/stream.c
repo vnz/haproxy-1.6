@@ -312,8 +312,8 @@ static void stream_free(struct stream *s)
 	}
 
 	/* Cleanup all variable contexts. */
-	vars_prune(&s->vars_txn, s);
-	vars_prune(&s->vars_reqres, s);
+	vars_prune(&s->vars_txn, s->sess, s);
+	vars_prune(&s->vars_reqres, s->sess, s);
 
 	stream_store_counters(s);
 
@@ -667,7 +667,8 @@ static int sess_update_st_cer(struct stream *s)
 	 */
 	if (objt_server(s->target) &&
 	    (s->be->options & PR_O_REDISP) && !(s->flags & SF_FORCE_PRST) &&
-	    ((((s->be->redispatch_after > 0) &&
+	    ((__objt_server(s->target)->state < SRV_ST_RUNNING) ||
+	     (((s->be->redispatch_after > 0) &&
 	       ((s->be->conn_retries - si->conn_retries) %
 	        s->be->redispatch_after == 0)) ||
 	      ((s->be->redispatch_after < 0) &&
@@ -759,6 +760,14 @@ static void sess_establish(struct stream *s)
 	req->wex = TICK_ETERNITY;
 }
 
+/* Check if the connection request is in such a state that it can be aborted. */
+static int check_req_may_abort(struct channel *req, struct stream *s)
+{
+	return ((req->flags & (CF_READ_ERROR)) ||
+	        ((req->flags & CF_SHUTW_NOW) &&  /* empty and client aborted */
+	         (channel_is_empty(req) || s->be->options & PR_O_ABRT_CLOSE)));
+}
+
 /* Update back stream interface status for input states SI_ST_ASS, SI_ST_QUE,
  * SI_ST_TAR. Other input states are simply ignored.
  * Possible output states are SI_ST_CLO, SI_ST_TAR, SI_ST_ASS, SI_ST_REQ, SI_ST_CON
@@ -782,6 +791,14 @@ static void sess_update_stream_int(struct stream *s)
 	if (si->state == SI_ST_ASS) {
 		/* Server assigned to connection request, we have to try to connect now */
 		int conn_err;
+
+		/* Before we try to initiate the connection, see if the
+		 * request may be aborted instead.
+		 */
+		if (check_req_may_abort(req, s)) {
+			si->err_type |= SI_ET_CONN_ABRT;
+			goto abort_connection;
+		}
 
 		conn_err = connect_server(s);
 		srv = objt_server(s->target);
@@ -878,19 +895,10 @@ static void sess_update_stream_int(struct stream *s)
 		}
 
 		/* Connection remains in queue, check if we have to abort it */
-		if ((req->flags & (CF_READ_ERROR)) ||
-		    ((req->flags & CF_SHUTW_NOW) &&   /* empty and client aborted */
-		     (channel_is_empty(req) || s->be->options & PR_O_ABRT_CLOSE))) {
-			/* give up */
-			si->exp = TICK_ETERNITY;
+		if (check_req_may_abort(req, s)) {
 			s->logs.t_queue = tv_ms_elapsed(&s->logs.tv_accept, &now);
-			si_shutr(si);
-			si_shutw(si);
 			si->err_type |= SI_ET_QUEUE_ABRT;
-			si->state = SI_ST_CLO;
-			if (s->srv_error)
-				s->srv_error(s, si);
-			return;
+			goto abort_connection;
 		}
 
 		/* Nothing changed */
@@ -898,18 +906,9 @@ static void sess_update_stream_int(struct stream *s)
 	}
 	else if (si->state == SI_ST_TAR) {
 		/* Connection request might be aborted */
-		if ((req->flags & (CF_READ_ERROR)) ||
-		    ((req->flags & CF_SHUTW_NOW) &&  /* empty and client aborted */
-		     (channel_is_empty(req) || s->be->options & PR_O_ABRT_CLOSE))) {
-			/* give up */
-			si->exp = TICK_ETERNITY;
-			si_shutr(si);
-			si_shutw(si);
+		if (check_req_may_abort(req, s)) {
 			si->err_type |= SI_ET_CONN_ABRT;
-			si->state = SI_ST_CLO;
-			if (s->srv_error)
-				s->srv_error(s, si);
-			return;
+			goto abort_connection;
 		}
 
 		if (!(si->flags & SI_FL_EXP))
@@ -927,6 +926,17 @@ static void sess_update_stream_int(struct stream *s)
 			si->state = SI_ST_REQ;
 		return;
 	}
+	return;
+
+abort_connection:
+	/* give up */
+	si->exp = TICK_ETERNITY;
+	si_shutr(si);
+	si_shutw(si);
+	si->state = SI_ST_CLO;
+	if (s->srv_error)
+		s->srv_error(s, si);
+	return;
 }
 
 /* Set correct stream termination flags in case no analyser has done it. It
@@ -1564,8 +1574,11 @@ struct task *process_stream(struct task *t)
 		      (CF_SHUTR|CF_READ_ACTIVITY|CF_READ_TIMEOUT|CF_SHUTW|
 		       CF_WRITE_ACTIVITY|CF_WRITE_TIMEOUT|CF_ANA_TIMEOUT)) &&
 		    !((si_f->flags | si_b->flags) & (SI_FL_EXP|SI_FL_ERR)) &&
-		    ((t->state & TASK_WOKEN_ANY) == TASK_WOKEN_TIMER))
+		    ((t->state & TASK_WOKEN_ANY) == TASK_WOKEN_TIMER)) {
+			si_f->flags &= ~SI_FL_DONT_WAKE;
+			si_b->flags &= ~SI_FL_DONT_WAKE;
 			goto update_exp_and_leave;
+		}
 	}
 
 	/* below we may emit error messages so we have to ensure that we have
@@ -1575,6 +1588,8 @@ struct task *process_stream(struct task *t)
 		/* No buffer available, we've been subscribed to the list of
 		 * buffer waiters, let's wait for our turn.
 		 */
+		si_f->flags &= ~SI_FL_DONT_WAKE;
+		si_b->flags &= ~SI_FL_DONT_WAKE;
 		goto update_exp_and_leave;
 	}
 
@@ -2052,7 +2067,7 @@ struct task *process_stream(struct task *t)
 		 * to the consumer (which might possibly not be connected yet).
 		 */
 		if (!(req->flags & (CF_SHUTR|CF_SHUTW_NOW)))
-			channel_forward(req, CHN_INFINITE_FORWARD);
+			channel_forward_forever(req);
 
 		/* Just in order to support fetching HTTP contents after start
 		 * of forwarding when the HTTP forwarding analyser is not used,
@@ -2091,10 +2106,6 @@ struct task *process_stream(struct task *t)
 	if (unlikely((req->flags & (CF_SHUTW|CF_SHUTW_NOW|CF_AUTO_CLOSE|CF_SHUTR)) ==
 		     (CF_AUTO_CLOSE|CF_SHUTR))) {
 		channel_shutw_now(req);
-		if (tick_isset(sess->fe->timeout.clientfin)) {
-			res->wto = sess->fe->timeout.clientfin;
-			res->wex = tick_add(now_ms, res->wto);
-		}
 	}
 
 	/* shutdown(write) pending */
@@ -2119,10 +2130,6 @@ struct task *process_stream(struct task *t)
 		if (si_f->flags & SI_FL_NOHALF)
 			si_f->flags |= SI_FL_NOLINGER;
 		si_shutr(si_f);
-		if (tick_isset(sess->fe->timeout.clientfin)) {
-			res->wto = sess->fe->timeout.clientfin;
-			res->wex = tick_add(now_ms, res->wto);
-		}
 	}
 
 	/* it's possible that an upper layer has requested a connection setup or abort.
@@ -2156,7 +2163,7 @@ struct task *process_stream(struct task *t)
 
 		/* prune the request variables and swap to the response variables. */
 		if (s->vars_reqres.scope != SCOPE_RES) {
-			vars_prune(&s->vars_reqres, s);
+			vars_prune(&s->vars_reqres, s->sess, s);
 			vars_init(&s->vars_reqres, SCOPE_RES);
 		}
 
@@ -2222,7 +2229,7 @@ struct task *process_stream(struct task *t)
 		 * to the consumer.
 		 */
 		if (!(res->flags & (CF_SHUTR|CF_SHUTW_NOW)))
-			channel_forward(res, CHN_INFINITE_FORWARD);
+			channel_forward_forever(res);
 
 		/* Just in order to support fetching HTTP contents after start
 		 * of forwarding when the HTTP forwarding analyser is not used,
@@ -2284,10 +2291,6 @@ struct task *process_stream(struct task *t)
 	if (unlikely((res->flags & (CF_SHUTW|CF_SHUTW_NOW|CF_AUTO_CLOSE|CF_SHUTR)) ==
 		     (CF_AUTO_CLOSE|CF_SHUTR))) {
 		channel_shutw_now(res);
-		if (tick_isset(s->be->timeout.serverfin)) {
-			req->wto = s->be->timeout.serverfin;
-			req->wex = tick_add(now_ms, req->wto);
-		}
 	}
 
 	/* shutdown(write) pending */
@@ -2310,10 +2313,6 @@ struct task *process_stream(struct task *t)
 		if (si_b->flags & SI_FL_NOHALF)
 			si_b->flags |= SI_FL_NOLINGER;
 		si_shutr(si_b);
-		if (tick_isset(s->be->timeout.serverfin)) {
-			req->wto = s->be->timeout.serverfin;
-			req->wex = tick_add(now_ms, req->wto);
-		}
 	}
 
 	if (si_f->state == SI_ST_DIS || si_b->state == SI_ST_DIS)
@@ -2390,6 +2389,7 @@ struct task *process_stream(struct task *t)
 		}
 
 	update_exp_and_leave:
+		/* Note: please ensure that if you branch here you disable SI_FL_DONT_WAKE */
 		t->expire = tick_first(tick_first(req->rex, req->wex),
 				       tick_first(res->rex, res->wex));
 		if (req->analysers)
@@ -2684,7 +2684,8 @@ smp_fetch_sc_stkctr(struct session *sess, struct stream *strm, const struct arg 
 	 * ctr form the stream, then from the session if it was not there.
 	 */
 
-	stkptr = &strm->stkctr[num];
+	if (strm)
+		stkptr = &strm->stkctr[num];
 	if (!strm || !stkctr_entry(stkptr)) {
 		stkptr = &sess->stkctr[num];
 		if (!stkctr_entry(stkptr))
@@ -2761,8 +2762,9 @@ smp_fetch_sc_tracked(const struct arg *args, struct sample *smp, const char *kw,
 static int
 smp_fetch_sc_get_gpt0(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2787,8 +2789,9 @@ smp_fetch_sc_get_gpt0(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_get_gpc0(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2813,8 +2816,9 @@ smp_fetch_sc_get_gpc0(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_gpc0_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2838,8 +2842,9 @@ smp_fetch_sc_gpc0_rate(const struct arg *args, struct sample *smp, const char *k
 static int
 smp_fetch_sc_inc_gpc0(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2850,7 +2855,7 @@ smp_fetch_sc_inc_gpc0(const struct arg *args, struct sample *smp, const char *kw
 	if (stkctr_entry(stkctr) == NULL)
 		stkctr = smp_create_src_stkctr(smp->sess, smp->strm, args, kw);
 
-	if (stkctr_entry(stkctr) != NULL) {
+	if (stkctr && stkctr_entry(stkctr)) {
 		void *ptr1,*ptr2;
 
 		/* First, update gpc0_rate if it's tracked. Second, update its
@@ -2881,8 +2886,9 @@ smp_fetch_sc_inc_gpc0(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_clr_gpc0(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2912,8 +2918,9 @@ smp_fetch_sc_clr_gpc0(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_conn_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2936,8 +2943,9 @@ smp_fetch_sc_conn_cnt(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_conn_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3003,8 +3011,9 @@ smp_fetch_src_updt_conn_cnt(const struct arg *args, struct sample *smp, const ch
 static int
 smp_fetch_sc_conn_cur(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3027,8 +3036,9 @@ smp_fetch_sc_conn_cur(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_sess_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3050,8 +3060,9 @@ smp_fetch_sc_sess_cnt(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_sess_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3075,8 +3086,9 @@ smp_fetch_sc_sess_rate(const struct arg *args, struct sample *smp, const char *k
 static int
 smp_fetch_sc_http_req_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3099,8 +3111,9 @@ smp_fetch_sc_http_req_cnt(const struct arg *args, struct sample *smp, const char
 static int
 smp_fetch_sc_http_req_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3124,8 +3137,9 @@ smp_fetch_sc_http_req_rate(const struct arg *args, struct sample *smp, const cha
 static int
 smp_fetch_sc_http_err_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3148,8 +3162,9 @@ smp_fetch_sc_http_err_cnt(const struct arg *args, struct sample *smp, const char
 static int
 smp_fetch_sc_http_err_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3173,8 +3188,9 @@ smp_fetch_sc_http_err_rate(const struct arg *args, struct sample *smp, const cha
 static int
 smp_fetch_sc_kbytes_in(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3197,8 +3213,9 @@ smp_fetch_sc_kbytes_in(const struct arg *args, struct sample *smp, const char *k
 static int
 smp_fetch_sc_bytes_in_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3222,8 +3239,9 @@ smp_fetch_sc_bytes_in_rate(const struct arg *args, struct sample *smp, const cha
 static int
 smp_fetch_sc_kbytes_out(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3246,8 +3264,9 @@ smp_fetch_sc_kbytes_out(const struct arg *args, struct sample *smp, const char *
 static int
 smp_fetch_sc_bytes_out_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3270,8 +3289,9 @@ smp_fetch_sc_bytes_out_rate(const struct arg *args, struct sample *smp, const ch
 static int
 smp_fetch_sc_trackers(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3318,7 +3338,7 @@ static enum act_parse_ret stream_parse_use_service(const char **args, int *cur_a
 	/* Check if the service name exists. */
 	if (*(args[*cur_arg]) == 0) {
 		memprintf(err, "'%s' expects a service name.", args[0]);
-		return -1;
+		return ACT_RET_PRS_ERR;
 	}
 
 	/* lookup for keyword corresponding to a service. */

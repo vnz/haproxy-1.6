@@ -4,7 +4,7 @@
                          ----------------------
                               version 1.6
                              willy tarreau
-                              2015/10/20
+                              2016/07/13
 
 
 This document covers the configuration language as implemented in the version
@@ -666,7 +666,7 @@ deviceatlas-separator <char>
   Sets the character separator for the API properties results. This directive
   is optional and set to | by default if not set.
 
-devicatlas-properties-cookie <name>
+deviceatlas-properties-cookie <name>
   Sets the client cookie's name used for the detection if the DeviceAtlas
   Client-side component was used during the request. This directive is optional
   and set to DAPROPS by default if not set.
@@ -1357,16 +1357,22 @@ tune.vars.global-max-size <size>
 tune.vars.reqres-max-size <size>
 tune.vars.sess-max-size <size>
 tune.vars.txn-max-size <size>
-  These four tunes helps to manage the allowed amount of memory used by the
-  variables system. "global" limits the memory for all the systems. "sess" limit
-  the memory by session, "txn" limits the memory by transaction and "reqres"
-  limits the memory for each request or response processing. during the
-  accounting, "sess" embbed "txn" and "txn" embed "reqres".
+  These four tunes help to manage the maximum amount of memory used by the
+  variables system. "global" limits the overall amount of memory available
+  for all scopes. "sess" limits the memory for the session scope, "txn" for
+  the transaction scope, and "reqres" limits the memory for each request or
+  response processing.
+  Memory accounting is hierarchical, meaning more coarse grained limits
+  include the finer grained ones: "sess" includes "txn", and "txn" includes
+  "reqres".
 
-  By example, we considers that "tune.vars.sess-max-size" is fixed to 100,
-  "tune.vars.txn-max-size" is fixed to 100, "tune.vars.reqres-max-size" is
-  also fixed to 100. If we create a variable "txn.var" that contains 100 bytes,
-  we cannot create any more variable in the other contexts.
+  For example, when "tune.vars.sess-max-size" is limited to 100,
+  "tune.vars.txn-max-size" and "tune.vars.reqres-max-size" cannot exceed
+  100 either. If we create a variable "txn.var" that contains 100 bytes,
+  all available space is consumed.
+  Notice that exceeding the limits at runtime will not result in an error
+  message, but values might be cut off or corrupted. So make sure to accurately
+  plan for the amount of space needed to store all your variables.
 
 tune.zlib.memlevel <number>
   Sets the memLevel parameter in zlib initialization for each session. It
@@ -2398,7 +2404,7 @@ capture request header <name> len <length>
   Example:
         capture request header Host len 15
         capture request header X-Forwarded-For len 15
-        capture request header Referrer len 15
+        capture request header Referer len 15
 
   See also : "capture cookie", "capture response header" as well as section 8
              about logging.
@@ -2493,14 +2499,14 @@ compression offload
                  data.
 
     gzip         applies gzip compression. This setting is only available when
-                 support for zlib was built in.
+                 support for zlib or libslz was built in.
 
     deflate      same as "gzip", but with deflate algorithm and zlib format.
                  Note that this algorithm has ambiguous support on many
                  browsers and no support at all from recent ones. It is
                  strongly recommended not to use it for anything else than
                  experimentation. This setting is only available when support
-                 for zlib was built in.
+                 for zlib or libslz was built in.
 
     raw-deflate  same as "deflate" without the zlib wrapper, and used as an
                  alternative when the browser wants "deflate". All major
@@ -2509,7 +2515,7 @@ compression offload
                  and some versions of Safari. Do not use it in conjunction
                  with "deflate", use either one or the other since both react
                  to the same Accept-Encoding token. This setting is only
-                 available when support for zlib was built in.
+                 available when support for zlib or libslz was built in.
 
   Compression will be activated depending on the Accept-Encoding request
   header. With identity, it does not take care of that header.
@@ -2612,11 +2618,11 @@ cookie <name> [ rewrite | insert | prefix ] [ indirect ] [ nocache ]
               of complex combinations of "Set-cookie" and "Cache-control"
               headers is left to the application. The application can then
               decide whether or not it is appropriate to emit a persistence
-              cookie. Since all responses should be monitored, this mode only
-              works in HTTP close mode. Unless the application behaviour is
-              very complex and/or broken, it is advised not to start with this
-              mode for new deployments. This keyword is incompatible with
-              "insert" and "prefix".
+              cookie. Since all responses should be monitored, this mode
+              doesn't work in HTTP tunnel mode. Unless the application
+              behaviour is very complex and/or broken, it is advised not to
+              start with this mode for new deployments. This keyword is
+              incompatible with "insert" and "prefix".
 
     insert    This keyword indicates that the persistence cookie will have to
               be inserted by haproxy in server responses if the client did not
@@ -2642,7 +2648,7 @@ cookie <name> [ rewrite | insert | prefix ] [ indirect ] [ nocache ]
               and a delimiter. The prefix will be removed from all client
               requests so that the server still finds the cookie it emitted.
               Since all requests and responses are subject to being modified,
-              this mode requires the HTTP close mode. The "prefix" keyword is
+              this mode doesn't work with tunnel mode. The "prefix" keyword is
               not compatible with "rewrite" and "insert". Note: it is highly
               recommended not to use "indirect" with "prefix", otherwise server
               cookie updates would not be sent to clients.
@@ -2770,6 +2776,7 @@ declare capture [ request | response ] len <length>
   for use in the response.
 
   See also: "capture-req", "capture-res" (sample converters),
+            "capture.req.hdr", "capture.res.hdr" (sample fetches),
             "http-request capture" and "http-response capture".
 
 
@@ -2917,7 +2924,7 @@ errorfile <code> <file>
 
   Example :
         errorfile 400 /etc/haproxy/errorfiles/400badreq.http
-        errorfile 408 /dev/null  # workaround Chrome pre-connect bug
+        errorfile 408 /dev/null  # work around Chrome pre-connect bug
         errorfile 403 /etc/haproxy/errorfiles/403forbid.http
         errorfile 503 /etc/haproxy/errorfiles/503sorry.http
 
@@ -2947,7 +2954,7 @@ errorloc302 <code> <url>
   client to fetch the designated URL using the same HTTP method. This can be
   quite problematic in case of non-GET methods such as POST, because the URL
   sent to the client might not be allowed for something other than GET. To
-  workaround this problem, please use "errorloc303" which send the HTTP 303
+  work around this problem, please use "errorloc303" which send the HTTP 303
   status code, indicating to the client that the URL must be fetched with a GET
   request.
 
@@ -3057,7 +3064,7 @@ email-alert myhostname <hostname>
 
   Arguments :
 
-    <emailaddr> is the to email address to use when sending email alerts
+    <hostname> is the hostname to use when communicating with mailers
 
   By default the systems hostname is used.
 
@@ -3414,7 +3421,8 @@ http-check send-state
 
   See also : "option httpchk", "http-check disable-on-404"
 
-http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
+http-request { allow | tarpit | auth [realm <realm>] | redirect <rule> |
+              deny [deny_status <status>] |
               add-header <name> <fmt> | set-header <name> <fmt> |
               capture <sample> [ len <length> | id <id> ] |
               del-header <name> | set-nice <nice> | set-log-level <level> |
@@ -3449,8 +3457,10 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
       pass the check. No further "http-request" rules are evaluated.
 
     - "deny" : this stops the evaluation of the rules and immediately rejects
-      the request and emits an HTTP 403 error. No further "http-request" rules
-      are evaluated.
+      the request and emits an HTTP 403 error, or optionally the status code
+      specified as an argument to "deny_status". The list of permitted status
+      codes is limited to those that can be overridden by the "errorfile"
+      directive. No further "http-request" rules are evaluated.
 
     - "tarpit" : this stops the evaluation of the rules and immediately blocks
       the request without responding for a delay specified by "timeout tarpit"
@@ -3654,6 +3664,8 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
       the captured string in a previously declared capture slot. This is useful
       to run captures in backends. The slot id can be declared by a previous
       directive "http-request capture" or with the "declare capture" keyword.
+      If the slot <id> doesn't exist, then HAProxy fails parsing the
+      configuration to prevent unexpected behavior at run time.
 
     - { track-sc0 | track-sc1 | track-sc2 } <key> [table <table>] :
       enables tracking of sticky counters from current request. These rules
@@ -3709,17 +3721,17 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
       Is used to set the contents of a variable. The variable is declared
       inline.
 
-        <var-name> The name of the variable starts by an indication about its
-                   scope. The allowed scopes are:
-                     "sess" : the variable is shared with all the session,
-                     "txn"  : the variable is shared with all the transaction
+        <var-name> The name of the variable starts with an indication about
+                   its scope. The scopes allowed are:
+                     "sess" : the variable is shared with the whole session
+                     "txn"  : the variable is shared with the transaction
                               (request and response)
-                     "req"  : the variable is shared only during the request
+                     "req"  : the variable is shared only during request
                               processing
-                     "res"  : the variable is shared only during the response
-                              processing.
+                     "res"  : the variable is shared only during response
+                              processing
                    This prefix is followed by a name. The separator is a '.'.
-                   The name may only contain characters 'a-z', 'A-Z', '0-9',
+                   The name may only contain characters 'a-z', 'A-Z', '0-9'
                    and '_'.
 
          <expr>    Is a standard HAProxy expression formed by a sample-fetch
@@ -3766,8 +3778,13 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
 
   It is important to know that http-request rules are processed very early in
   the HTTP processing, just after "block" rules and before "reqdel" or "reqrep"
-  rules. That way, headers added by "add-header"/"set-header" are visible by
-  almost all further ACL rules.
+  or "reqadd" rules. That way, headers added by "add-header"/"set-header" are
+  visible by almost all further ACL rules.
+
+  Using "reqadd"/"reqdel"/"reqrep" to manipulate request headers is discouraged
+  in newer versions (>= 1.5). But if you need to use regular expression to
+  delete headers, you can still use "reqdel". Also please use
+  "http-request deny/allow/tarpit" instead of "reqdeny"/"reqpass"/"reqtarpit".
 
   Example:
         acl nagios src 192.168.129.3
@@ -4002,6 +4019,8 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
       This is useful to run captures in backends. The slot id can be declared by
       a previous directive "http-response capture" or with the "declare capture"
       keyword.
+      If the slot <id> doesn't exist, then HAProxy fails parsing the
+      configuration to prevent unexpected behavior at run time.
 
     - "redirect" : this performs an HTTP redirection based on a redirect rule.
       This supports a format string similarly to "http-request redirect" rules,
@@ -4014,17 +4033,17 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
       Is used to set the contents of a variable. The variable is declared
       inline.
 
-        <var-name> The name of the variable starts by an indication about its
-                   scope. The allowed scopes are:
-                     "sess" : the variable is shared with all the session,
-                     "txn"  : the variable is shared with all the transaction
+        <var-name> The name of the variable starts with an indication about
+                   its scope. The scopes allowed are:
+                     "sess" : the variable is shared with the whole session
+                     "txn"  : the variable is shared with the transaction
                               (request and response)
-                     "req"  : the variable is shared only during the request
+                     "req"  : the variable is shared only during request
                               processing
-                     "res"  : the variable is shared only during the response
-                              processing.
+                     "res"  : the variable is shared only during response
+                              processing
                    This prefix is followed by a name. The separator is a '.'.
-                   The name may only contain characters 'a-z', 'A-Z', '0-9',
+                   The name may only contain characters 'a-z', 'A-Z', '0-9'
                    and '_'.
 
          <expr>    Is a standard HAProxy expression formed by a sample-fetch
@@ -4065,9 +4084,14 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
   There is no limit to the number of http-response statements per instance.
 
   It is important to know that http-response rules are processed very early in
-  the HTTP processing, before "reqdel" or "reqrep" rules. That way, headers
-  added by "add-header"/"set-header" are visible by almost all further ACL
+  the HTTP processing, before "rspdel" or "rsprep" or "rspadd" rules. That way,
+  headers added by "add-header"/"set-header" are visible by almost all further ACL
   rules.
+
+  Using "rspadd"/"rspdel"/"rsprep" to manipulate request headers is discouraged
+  in newer versions (>= 1.5). But if you need to use regular expression to
+  delete headers, you can still use "rspdel". Also please use
+  "http-response deny" instead of "rspdeny".
 
   Example:
          acl key_acl res.hdr(X-Acl-Key) -m found
@@ -4486,10 +4510,10 @@ maxconn <conns>
   very high so that haproxy manages connection queues, instead of leaving the
   clients with unanswered connection attempts. This value should not exceed the
   global maxconn. Also, keep in mind that a connection contains two buffers
-  of 8kB each, as well as some other data resulting in about 17 kB of RAM being
-  consumed per established connection. That means that a medium system equipped
-  with 1GB of RAM can withstand around 40000-50000 concurrent connections if
-  properly tuned.
+  of tune.bufsize (16kB by default) each, as well as some other data resulting
+  in about 33 kB of RAM being consumed per established connection. That means
+  that a medium system equipped with 1GB of RAM can withstand around
+  20000-25000 concurrent connections if properly tuned.
 
   Also, when <conns> is set to large values, it is possible that the servers
   are not sized to accept such loads, and for this reason it is generally wise
@@ -5054,7 +5078,7 @@ no option http-buffer-request
   the frontend and the backend, so this should definitely not be used by
   default.
 
-  See also : "option http-no-delay"
+  See also : "option http-no-delay", "timeout http-request"
 
 
 option http-ignore-probes
@@ -5324,11 +5348,9 @@ no option http-use-proxy-header
 
   By setting this option in a frontend, haproxy can automatically switch to use
   that non-standard header if it sees proxied requests. A proxied request is
-  defined here as one where the URI begins with neither a '/' nor a '*'. The
-  choice of header only affects requests passing through proxies making use of
-  one of the "httpclose", "forceclose" and "http-server-close" options. Note
-  that this option can only be specified in a frontend and will affect the
-  request along its whole life.
+  defined here as one where the URI begins with neither a '/' nor a '*'. This
+  is incompatible with the HTTP tunnel mode. Note that this option can only be
+  specified in a frontend and will affect the request along its whole life.
 
   Also, when this option is set, a request which requires authentication will
   automatically switch to use proxy authentication headers if it is itself a
@@ -5477,10 +5499,8 @@ no option http_proxy
 
   No host address resolution is performed, so this only works when pure IP
   addresses are passed. Since this option's usage perimeter is rather limited,
-  it will probably be used only by experts who know they need exactly it. Last,
-  if the clients are susceptible of sending keep-alive requests, it will be
-  needed to add "option httpclose" to ensure that all requests will correctly
-  be analyzed.
+  it will probably be used only by experts who know they need exactly it. This
+  is incompatible with the HTTP tunnel mode.
 
   If this option has been enabled in a "defaults" section, it can be disabled
   in a specific instance by prepending the "no" keyword before it.
@@ -6474,7 +6494,7 @@ rate-limit sessions <rate>
             mode tcp
             bind :25
             rate-limit sessions 10
-            server 127.0.0.1:1025
+            server smtp1 127.0.0.1:1025
 
   Note : when the maximum rate is reached, the frontend's status is not changed
          but its sockets appear as "WAITING" in the statistics if the
@@ -6584,7 +6604,8 @@ redirect scheme   <sch> [code <code>] <option> [{if | unless} <condition>]
         redirect scheme https if !{ ssl_fc }
 
   Example: append 'www.' prefix in front of all hosts not having it
-        http-request redirect code 301 location www.%[hdr(host)]%[req.uri] \
+        http-request redirect code 301 location      \
+          http://www.%[hdr(host)]%[capture.req.uri]  \
           unless { hdr_beg(host) -i www }
 
   See section 7 about ACL usage.
@@ -6637,8 +6658,8 @@ reqadd  <string> [{if | unless} <cond>]
      acl is-ssl  dst_port       81
      reqadd      X-Proto:\ SSL  if is-ssl
 
-  See also: "rspadd", section 6 about HTTP header manipulation, and section 7
-            about ACLs.
+  See also: "rspadd", "http-request", section 6 about HTTP header manipulation,
+            and section 7 about ACLs.
 
 
 reqallow  <search> [{if | unless} <cond>]
@@ -6672,8 +6693,8 @@ reqiallow <search> [{if | unless} <cond>] (ignore case)
      reqiallow ^Host:\ www\.
      reqideny  ^Host:\ .*\.local
 
-  See also: "reqdeny", "block", section 6 about HTTP header manipulation, and
-            section 7 about ACLs.
+  See also: "reqdeny", "block", "http-request",  section 6 about HTTP header
+            manipulation, and section 7 about ACLs.
 
 
 reqdel  <search> [{if | unless} <cond>]
@@ -6706,8 +6727,8 @@ reqidel <search> [{if | unless} <cond>]  (ignore case)
      reqidel ^X-Forwarded-For:.*
      reqidel ^Cookie:.*SERVER=
 
-  See also: "reqadd", "reqrep", "rspdel", section 6 about HTTP header
-            manipulation, and section 7 about ACLs.
+  See also: "reqadd", "reqrep", "rspdel", "http-request", section 6 about
+            HTTP header manipulation, and section 7 about ACLs.
 
 
 reqdeny  <search> [{if | unless} <cond>]
@@ -6745,8 +6766,8 @@ reqideny <search> [{if | unless} <cond>]  (ignore case)
      reqideny  ^Host:\ .*\.local
      reqiallow ^Host:\ www\.
 
-  See also: "reqallow", "rspdeny", "block", section 6 about HTTP header
-            manipulation, and section 7 about ACLs.
+  See also: "reqallow", "rspdeny", "block", "http-request", section 6 about
+            HTTP header manipulation, and section 7 about ACLs.
 
 
 reqpass  <search> [{if | unless} <cond>]
@@ -6780,8 +6801,8 @@ reqipass <search> [{if | unless} <cond>]  (ignore case)
      reqideny  ^Host:\ .*\.local
      reqiallow ^Host:\ www\.
 
-  See also: "reqallow", "reqdeny", "block", section 6 about HTTP header
-            manipulation, and section 7 about ACLs.
+  See also: "reqallow", "reqdeny", "block", "http-request", section 6 about
+            HTTP header manipulation, and section 7 about ACLs.
 
 
 reqrep  <search> <string> [{if | unless} <cond>]
@@ -6822,8 +6843,8 @@ reqirep <search> <string> [{if | unless} <cond>]   (ignore case)
      # replace "www.mydomain.com" with "www" in the host name.
      reqirep ^Host:\ www.mydomain.com   Host:\ www
 
-  See also: "reqadd", "reqdel", "rsprep", "tune.bufsize", section 6 about
-            HTTP header manipulation, and section 7 about ACLs.
+  See also: "reqadd", "reqdel", "rsprep", "tune.bufsize", "http-request",
+            section 6 about HTTP header manipulation, and section 7 about ACLs.
 
 
 reqtarpit  <search> [{if | unless} <cond>]
@@ -6867,8 +6888,8 @@ reqitarpit <search> [{if | unless} <cond>]  (ignore case)
      acl badguys src 10.1.0.3 172.16.13.20/28
      reqitarpit . if badguys
 
-  See also: "reqallow", "reqdeny", "reqpass", section 6 about HTTP header
-            manipulation, and section 7 about ACLs.
+  See also: "reqallow", "reqdeny", "reqpass", "http-request",  section 6
+            about HTTP header manipulation, and section 7 about ACLs.
 
 
 retries <value>
@@ -6913,8 +6934,8 @@ rspadd <string> [{if | unless} <cond>]
   and not to traffic generated by HAProxy, such as health-checks or error
   responses.
 
-  See also: "reqadd", section 6 about HTTP header manipulation, and section 7
-            about ACLs.
+  See also: "rspdel" "reqadd", "http-response", section 6 about HTTP header
+            manipulation, and section 7 about ACLs.
 
 
 rspdel  <search> [{if | unless} <cond>]
@@ -6947,8 +6968,8 @@ rspidel <search> [{if | unless} <cond>]  (ignore case)
      # remove the Server header from responses
      rspidel ^Server:.*
 
-  See also: "rspadd", "rsprep", "reqdel", section 6 about HTTP header
-            manipulation, and section 7 about ACLs.
+  See also: "rspadd", "rsprep", "reqdel", "http-response",  section 6 about
+            HTTP header manipulation, and section 7 about ACLs.
 
 
 rspdeny  <search> [{if | unless} <cond>]
@@ -6985,8 +7006,8 @@ rspideny <search> [{if | unless} <cond>]  (ignore case)
      # Ensure that no content type matching ms-word will leak
      rspideny  ^Content-type:\.*/ms-word
 
-  See also: "reqdeny", "acl", "block", section 6 about HTTP header manipulation
-            and section 7 about ACLs.
+  See also: "reqdeny", "acl", "block", "http-response",  section 6 about
+            HTTP header manipulation and section 7 about ACLs.
 
 
 rsprep  <search> <string> [{if | unless} <cond>]
@@ -7026,8 +7047,8 @@ rspirep <search> <string> [{if | unless} <cond>]  (ignore case)
      # replace "Location: 127.0.0.1:8080" with "Location: www.mydomain.com"
      rspirep ^Location:\ 127.0.0.1:8080    Location:\ www.mydomain.com
 
-  See also: "rspadd", "rspdel", "reqrep", section 6 about HTTP header
-            manipulation, and section 7 about ACLs.
+  See also: "rspadd", "rspdel", "reqrep", "http-response", section 6 about
+            HTTP header manipulation, and section 7 about ACLs.
 
 
 server <name> <address>[:[port]] [param*]
@@ -8151,8 +8172,9 @@ stick-table type {ip | integer | string [len <length>] | binary [len <length>]}
 
   It is important to understand that stickiness based on learning information
   has some limitations, including the fact that all learned associations are
-  lost upon restart. In general it can be good as a complement but not always
-  as an exclusive stickiness.
+  lost upon restart unless peers are properly configured to transfer such
+  information upon restart (recommended). In general it can be good as a
+  complement but not always as an exclusive stickiness.
 
   Last, memory requirements may be important when storing many data types.
   Indeed, storing all indicators above at once in each entry requires 116 bytes
@@ -8170,7 +8192,7 @@ stick-table type {ip | integer | string [len <length>] | binary [len <length>]}
 
 
 stick store-response <pattern> [table <table>] [{if | unless} <condition>]
-  Define a request pattern used to create an entry in a stickiness table
+  Define a response pattern used to create an entry in a stickiness table
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    no    |   yes  |   yes
 
@@ -8651,7 +8673,7 @@ tcp-request content <action> [{if | unless} <condition>]
     - capture : the specified sample expression is captured
     - { track-sc0 | track-sc1 | track-sc2 } <key> [table <table>]
     - sc-inc-gpc0(<sc-id>)
-    - set-gpt0(<sc-id>) <int>
+    - sc-set-gpt0(<sc-id>) <int>
     - set-var(<var-name>) <expr>
     - silent-drop
 
@@ -8686,17 +8708,18 @@ tcp-request content <action> [{if | unless} <condition>]
   The "set-var" is used to set the content of a variable. The variable is
   declared inline.
 
-    <var-name> The name of the variable starts by an indication about its scope.
-               The allowed scopes are:
-                 "sess" : the variable is shared with all the session,
-                 "txn"  : the variable is shared with all the transaction
+    <var-name> The name of the variable starts with an indication about
+               its scope. The scopes allowed are:
+                 "sess" : the variable is shared with the whole session
+                 "txn"  : the variable is shared with the transaction
                           (request and response)
-                 "req"  : the variable is shared only during the request
+                 "req"  : the variable is shared only during request
                           processing
-                 "res"  : the variable is shared only during the response
-                          processing.
+                 "res"  : the variable is shared only during response
+                          processing
                This prefix is followed by a name. The separator is a '.'.
-               The name may only contain characters 'a-z', 'A-Z', '0-9' and '_'.
+               The name may only contain characters 'a-z', 'A-Z', '0-9'
+               and '_'.
 
     <expr>     Is a standard HAProxy expression formed by a sample-fetch
                followed by some converters.
@@ -8897,17 +8920,18 @@ tcp-response content <action> [{if | unless} <condition>]
   The "set-var" is used to set the content of a variable. The variable is
   declared inline.
 
-    <var-name> The name of the variable starts by an indication about its scope.
-               The allowed scopes are:
-                 "sess" : the variable is shared with all the session,
-                 "txn"  : the variable is shared with all the transaction
+    <var-name> The name of the variable starts with an indication about
+               its scope. The scopes allowed are:
+                 "sess" : the variable is shared with the whole session
+                 "txn"  : the variable is shared with the transaction
                           (request and response)
-                 "req"  : the variable is shared only during the request
+                 "req"  : the variable is shared only during request
                           processing
-                 "res"  : the variable is shared only during the response
-                          processing.
+                 "res"  : the variable is shared only during response
+                          processing
                This prefix is followed by a name. The separator is a '.'.
-               The name may only contain characters 'a-z', 'A-Z', '0-9' and '_'.
+               The name may only contain characters 'a-z', 'A-Z', '0-9'
+               and '_'.
 
     <expr>     Is a standard HAProxy expression formed by a sample-fetch
                followed by some converters.
@@ -8980,8 +9004,10 @@ timeout clitimeout <timeout> (deprecated)
   The inactivity timeout applies when the client is expected to acknowledge or
   send data. In HTTP mode, this timeout is particularly important to consider
   during the first phase, when the client sends the request, and during the
-  response while it is reading data sent by the server. The value is specified
-  in milliseconds by default, but can be in any other unit if the number is
+  response while it is reading data sent by the server. That said, for the
+  first phase, it is preferable to set the "timeout http-request" to better
+  protect HAProxy from Slowloris like attacks. The value is specified in
+  milliseconds by default, but can be in any other unit if the number is
   suffixed by the unit, as specified at the top of this document. In TCP mode
   (and to a lesser extent, in HTTP mode), it is highly recommended that the
   client timeout remains equal to the server timeout in order to avoid complex
@@ -9003,7 +9029,8 @@ timeout clitimeout <timeout> (deprecated)
   to use it to write new configurations. The form "timeout clitimeout" is
   provided only by backwards compatibility but its use is strongly discouraged.
 
-  See also : "clitimeout", "timeout server", "timeout tunnel".
+  See also : "clitimeout", "timeout server", "timeout tunnel",
+             "timeout http-request".
 
 
 timeout client-fin <timeout>
@@ -9128,9 +9155,11 @@ timeout http-request <timeout>
   code using "option http-ignore-probes" or "errorfile 408 /dev/null". See
   more details in the explanations of the "cR" termination code in section 8.5.
 
-  Note that this timeout only applies to the header part of the request, and
-  not to any data. As soon as the empty line is received, this timeout is not
-  used anymore. It is used again on keep-alive connections to wait for a second
+  By default, this timeout only applies to the header part of the request,
+  and not to any data. As soon as the empty line is received, this timeout is
+  not used anymore. When combined with "option http-buffer-request", this
+  timeout also applies to the body of the request..
+  It is used again on keep-alive connections to wait for a second
   request if "timeout http-keep-alive" is not set.
 
   Generally it is enough to set it to a few seconds, as most clients send the
@@ -9145,7 +9174,7 @@ timeout http-request <timeout>
   timeout will be used.
 
   See also : "errorfile", "http-ignore-probes", "timeout http-keep-alive", and
-             "timeout client".
+             "timeout client", "option http-buffer-request".
 
 
 timeout queue <timeout>
@@ -9993,10 +10022,11 @@ The currently supported settings are the following ones.
 
 addr <ipv4|ipv6>
   Using the "addr" parameter, it becomes possible to use a different IP address
-  to send health-checks. On some servers, it may be desirable to dedicate an IP
-  address to specific component able to perform complex tests which are more
-  suitable to health-checks than the application. This parameter is ignored if
-  the "check" parameter is not set. See also the "port" parameter.
+  to send health-checks or to probe the agent-check. On some servers, it may be
+  desirable to dedicate an IP address to specific component able to perform
+  complex tests which are more suitable to health-checks than the application.
+  This parameter is ignored if the "check" parameter is not set. See also the
+  "port" parameter.
 
   Supported in default-server: No
 
@@ -10050,7 +10080,7 @@ agent-check
   parameter. Warning though, it is not a good idea to stop an agent after it
   reports "down", since only an agent reporting "up" will be able to turn the
   server up again. Note that the CLI on the Unix stats socket is also able to
-  force an agent's result in order to workaround a bogus agent if needed.
+  force an agent's result in order to work around a bogus agent if needed.
 
   Requires the "agent-port" parameter to be set. See also the "agent-inter"
   parameter.
@@ -11267,7 +11297,7 @@ different forms :
   - suffix match    (-m end) : the patterns are compared with the end of the
     extracted string, and the ACL matches if any of them matches.
 
-  - subdir match    (-m sub) : the patterns are looked up inside the extracted
+  - subdir match    (-m dir) : the patterns are looked up inside the extracted
     string, delimited with slashes ("/"), and the ACL matches if any of them
     matches.
 
@@ -11320,6 +11350,21 @@ difficult to read and debug configurations. If hostnames are used, you should
 at least ensure that they are present in /etc/hosts so that the configuration
 does not depend on any random DNS match at the moment the configuration is
 parsed.
+
+The dotted IPv4 address notation is supported in both regular as well as the
+abbreviated form with all-0-octets omitted:
+
+    +------------------+------------------+------------------+
+    |   Example 1      |     Example 2    |     Example 3    |
+    +------------------+------------------+------------------+
+    |  192.168.0.1     |   10.0.0.12      |   127.0.0.1      |
+    |  192.168.1       |   10.12          |   127.1          |
+    |  192.168.0.1/22  |   10.0.0.12/8    |   127.0.0.1/8    |
+    |  192.168.1/22    |   10.12/8        |   127.1/8        |
+    +------------------+------------------+------------------+
+
+Notice that this is different from RFC 4632 CIDR address notation in which
+192.168.42/24 would be equivalent to 192.168.42.0/24.
 
 IPv6 may be entered in their usual form, with or without a netmask appended.
 Only bit counts are accepted for IPv6 netmasks. In order to avoid any risk of
@@ -11479,27 +11524,25 @@ The currently available list of transformation keywords include :
 add(<value>)
   Adds <value> to the input value of type signed integer, and returns the
   result as a signed integer. <value> can be a numeric value or a variable
-  name. The name of the variable starts by an indication about its scope. The
-  allowed scopes are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
-             response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
-  This prefix is followed by a name. The separator is a '.'. The name may only
+  name. The name of the variable starts with an indication about its scope. The
+  scopes allowed are:
+    "sess" : the variable is shared with the whole session
+    "txn"  : the variable is shared with the transaction (request and response)
+    "req"  : the variable is shared only during request processing
+    "res"  : the variable is shared only during response processing
+  This prefix is followed by a name. The separator is a '.'.  The name may only
   contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 and(<value>)
   Performs a bitwise "AND" between <value> and the input value of type signed
   integer, and returns the result as an signed integer. <value> can be a
-  numeric value or a variable name. The name of the variable starts by an
-  indication about its scope. The allowed scopes are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
-             response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
-  This prefix is followed by a name. The separator is a '.'. The name may only
+  numeric value or a variable name. The name of the variable starts with an
+  indication about its scope. The scopes allowed are:
+    "sess" : the variable is shared with the whole session
+    "txn"  : the variable is shared with the transaction (request and response)
+    "req"  : the variable is shared only during request processing
+    "res"  : the variable is shared only during response processing
+  This prefix is followed by a name. The separator is a '.'.  The name may only
   contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 base64
@@ -11558,14 +11601,13 @@ div(<value>)
   Divides the input value of type signed integer by <value>, and returns the
   result as an signed integer. If <value> is null, the largest unsigned
   integer is returned (typically 2^63-1). <value> can be a numeric value or a
-  variable name. The name of the variable starts by an indication about it
-  scope. The scope allowed are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
-             response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
-  This prefix is followed by a name. The separator is a '.'. The name may only
+  variable name. The name of the variable starts with an indication about its
+  scope. The scopes allowed are:
+    "sess" : the variable is shared with the whole session
+    "txn"  : the variable is shared with the transaction (request and response)
+    "req"  : the variable is shared only during request processing
+    "res"  : the variable is shared only during response processing
+  This prefix is followed by a name. The separator is a '.'.  The name may only
   contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 djb2([<avalanche>])
@@ -11646,7 +11688,7 @@ json([<input-code>])
   Example:
      capture request header user-agent len 150
      capture request header Host len 15
-     log-format {"ip":"%[src]","user-agent":"%[capture.req.hdr(1),json]"}
+     log-format {"ip":"%[src]","user-agent":"%[capture.req.hdr(1),json("utf8s")]"}
 
   Input request from client 127.0.0.1:
      GET / HTTP/1.0
@@ -11762,13 +11804,12 @@ mod(<value>)
   Divides the input value of type signed integer by <value>, and returns the
   remainder as an signed integer. If <value> is null, then zero is returned.
   <value> can be a numeric value or a variable name. The name of the variable
-  starts by an indication about its scope. The allowed scopes are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
-             response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
-  This prefix is followed by a name. The separator is a '.'. The name may only
+  starts with an indication about its scope. The scopes allowed are:
+    "sess" : the variable is shared with the whole session
+    "txn"  : the variable is shared with the transaction (request and response)
+    "req"  : the variable is shared only during request processing
+    "res"  : the variable is shared only during response processing
+  This prefix is followed by a name. The separator is a '.'.  The name may only
   contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 mul(<value>)
@@ -11776,13 +11817,12 @@ mul(<value>)
   the product as an signed integer. In case of overflow, the largest possible
   value for the sign is returned so that the operation doesn't wrap around.
   <value> can be a numeric value or a variable name. The name of the variable
-  starts by an indication about its scope. The allowed scopes are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
-             response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
-  This prefix is followed by a name. The separator is a '.'. The name may only
+  starts with an indication about its scope. The scopes allowed are:
+    "sess" : the variable is shared with the whole session
+    "txn"  : the variable is shared with the transaction (request and response)
+    "req"  : the variable is shared only during request processing
+    "res"  : the variable is shared only during response processing
+  This prefix is followed by a name. The separator is a '.'.  The name may only
   contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 neg
@@ -11804,14 +11844,13 @@ odd
 or(<value>)
   Performs a bitwise "OR" between <value> and the input value of type signed
   integer, and returns the result as an signed integer. <value> can be a
-  numeric value or a variable name. The name of the variable starts by an
-  indication about its scope. The allowed scopes are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
-             response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
-  This prefix is followed by a name. The separator is a '.'. The name may only
+  numeric value or a variable name. The name of the variable starts with an
+  indication about its scope. The scopes allowed are:
+    "sess" : the variable is shared with the whole session
+    "txn"  : the variable is shared with the transaction (request and response)
+    "req"  : the variable is shared only during request processing
+    "res"  : the variable is shared only during response processing
+  This prefix is followed by a name. The separator is a '.'.  The name may only
   contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 regsub(<regex>,<subst>[,<flags>])
@@ -11825,9 +11864,10 @@ regsub(<regex>,<subst>[,<flags>])
   string, it is made up from the concatenation of all desired flags. Thus if
   both "i" and "g" are desired, using "gi" or "ig" will have the same effect.
   It is important to note that due to the current limitations of the
-  configuration parser, some characters such as closing parenthesis or comma
-  are not possible to use in the arguments. The first use of this converter is
-  to replace certain characters or sequence of characters with other ones.
+  configuration parser, some characters such as closing parenthesis, closing
+  square brackets or comma are not possible to use in the arguments. The first
+  use of this converter is to replace certain characters or sequence of
+  characters with other ones.
 
   Example :
 
@@ -11841,16 +11881,16 @@ capture-req(<id>)
   is. If the slot doesn't exist, the capture fails silently.
 
   See also: "declare capture", "http-request capture",
-            "http-response capture", "req.hdr.capture" and
-            "res.hdr.capture" (sample fetches).
+            "http-response capture", "capture.req.hdr" and
+            "capture.res.hdr" (sample fetches).
 
 capture-res(<id>)
   Capture the string entry in the response slot <id> and returns the entry as
   is. If the slot doesn't exist, the capture fails silently.
 
   See also: "declare capture", "http-request capture",
-            "http-response capture", "req.hdr.capture" and
-            "res.hdr.capture" (sample fetches).
+            "http-response capture", "capture.req.hdr" and
+            "capture.res.hdr" (sample fetches).
 
 sdbm([<avalanche>])
   Hashes a binary input sample into an unsigned 32-bit quantity using the SDBM
@@ -11864,14 +11904,14 @@ sdbm([<avalanche>])
   "hash-type" directive.
 
 set-var(<var name>)
-  Sets a variable with the input content and return the content on the output as
-  is. The variable keep the value and the associated input type. The name of the
-  variable starts by an indication about it scope. The scope allowed are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
+  Sets a variable with the input content and returns the content on the output as
+  is. The variable keeps the value and the associated input type. The name of the
+  variable starts with an indication about its scope. The scopes allowed are:
+    "sess" : the variable is shared with the whole session
+    "txn"  : the variable is shared with the transaction (request and
              response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
+    "req"  : the variable is shared only during request processing,
+    "res"  : the variable is shared only during response processing.
   This prefix is followed by a name. The separator is a '.'. The name may only
   contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
@@ -11879,13 +11919,13 @@ sub(<value>)
   Subtracts <value> from the input value of type signed integer, and returns
   the result as an signed integer. Note: in order to subtract the input from
   a constant, simply perform a "neg,add(value)". <value> can be a numeric value
-  or a variable name. The name of the variable starts by an indication about its
-  scope. The allowed scopes are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
+  or a variable name. The name of the variable starts with an indication about
+  its scope. The scopes allowed are:
+    "sess" : the variable is shared with the whole session
+    "txn"  : the variable is shared with the transaction (request and
              response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
+    "req"  : the variable is shared only during request processing,
+    "res"  : the variable is shared only during response processing.
   This prefix is followed by a name. The separator is a '.'. The name may only
   contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
@@ -12077,12 +12117,12 @@ xor(<value>)
   Performs a bitwise "XOR" (exclusive OR) between <value> and the input value
   of type signed integer, and returns the result as an signed integer.
   <value> can be a numeric value or a variable name. The name of the variable
-  starts by an indication about its scope. The allowed scopes are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
+  starts with an indication about its scope. The scopes allowed are:
+    "sess" : the variable is shared with the whole session
+    "txn"  : the variable is shared with the transaction (request and
              response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
+    "req"  : the variable is shared only during request processing,
+    "res"  : the variable is shared only during response processing.
   This prefix is followed by a name. The separator is a '.'. The name may only
   contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
@@ -12334,16 +12374,15 @@ table_cnt([<table>]) : integer
 
 var(<var-name>) : undefined
   Returns a variable with the stored type. If the variable is not set, the
-  sample fetch fails. The name of the variable starts by an indication about its
-  scope. The scope allowed are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
+  sample fetch fails. The name of the variable starts with an indication
+  about its scope. The scopes allowed are:
+    "sess" : the variable is shared with the whole session
+    "txn"  : the variable is shared with the transaction (request and
              response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
+    "req"  : the variable is shared only during request processing,
+    "res"  : the variable is shared only during response processing.
   This prefix is followed by a name. The separator is a '.'. The name may only
   contain characters 'a-z', 'A-Z', '0-9' and '_'.
-
 
 7.3.3. Fetching samples at Layer 4
 ----------------------------------
@@ -13007,7 +13046,7 @@ ssl_fc_has_sni : boolean
   that the SSL library is build with support for TLS extensions enabled (check
   haproxy -vv).
 
-ssl_fc_is_resumed: boolean
+ssl_fc_is_resumed : boolean
   Returns true if the SSL/TLS session has been resumed through the use of
   SSL session cache or TLS tickets.
 
@@ -13817,6 +13856,18 @@ urlp_val([<name>[,<delim>])] : integer
   See "urlp" above. This one extracts the URL parameter <name> in the request
   and converts it to an integer value. This can be used for session stickiness
   based on a user ID for example, or with ACLs to match a page number or price.
+
+url32 : integer
+  This returns a 32-bit hash of the value obtained by concatenating the first
+  Host header and the whole URL including parameters (not only the path part of
+  the request, as in the "base32" fetch above). This is useful to track per-URL
+  activity. A shorter hash is stored, saving a lot of memory. The output type
+  is an unsigned integer.
+
+url32+src : binary
+  This returns the concatenation of the "url32" fetch and the "src" fetch. The
+  resulting type is of type binary, with a size of 8 or 20 bytes depending on
+  the source address family. This can be used to track per-IP, per-URL counters.
 
 
 7.4. Pre-defined ACLs
@@ -14688,7 +14739,7 @@ Most common cases :
     spent accepting these connections will inevitably slightly delay processing
     of other connections, and it can happen that request times in the order of
     a few tens of milliseconds are measured after a few thousands of new
-    connections have been accepted at once. Setting "option http-server-close"
+    connections have been accepted at once. Using one of the keep-alive modes
     may display larger request times since "Tq" also measures the time spent
     waiting for additional requests.
 

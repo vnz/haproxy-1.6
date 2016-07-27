@@ -847,6 +847,7 @@ static char *update_log_hdr_rfc5424(const time_t time)
 {
 	static long tvsec;
 	static char *dataptr = NULL; /* backup of last end of header, NULL first time */
+	const char *gmt_offset;
 
 	if (unlikely(time != tvsec || dataptr == NULL)) {
 		/* this string is rebuild only once a second */
@@ -855,12 +856,13 @@ static char *update_log_hdr_rfc5424(const time_t time)
 
 		tvsec = time;
 		get_localtime(tvsec, &tm);
+		gmt_offset = get_gmt_offset(time, &tm);
 
 		hdr_len = snprintf(logheader_rfc5424, global.max_syslog_len,
 				   "<<<<>1 %4d-%02d-%02dT%02d:%02d:%02d%.3s:%.2s %s ",
 				   tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
 				   tm.tm_hour, tm.tm_min, tm.tm_sec,
-				   localtimezone, localtimezone+3,
+				   gmt_offset, gmt_offset+3,
 				   global.log_send_hostname ? global.log_send_hostname : hostname);
 		/* WARNING: depending upon implementations, snprintf may return
 		 * either -1 or the number of bytes that would be needed to store
@@ -1350,7 +1352,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 
 			case LOG_FMT_DATELOCAL: // %Tl
 				get_localtime(s->logs.accept_date.tv_sec, &tm);
-				ret = localdate2str_log(tmplog, &tm, dst + maxsize - tmplog);
+				ret = localdate2str_log(tmplog, s->logs.accept_date.tv_sec, &tm, dst + maxsize - tmplog);
 				if (ret == NULL)
 					goto out;
 				tmplog = ret;
@@ -1521,7 +1523,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_STATUS: // %ST
-				ret = ltoa_o(txn->status, tmplog, dst + maxsize - tmplog);
+				ret = ltoa_o(txn ? txn->status : 0, tmplog, dst + maxsize - tmplog);
 				if (ret == NULL)
 					goto out;
 				tmplog = ret;
@@ -1547,7 +1549,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_CCLIENT: // %CC
-				src = txn->cli_cookie;
+				src = txn ? txn->cli_cookie : NULL;
 				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
 				if (ret == NULL)
 					goto out;
@@ -1556,7 +1558,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_CSERVER: // %CS
-				src = txn->srv_cookie;
+				src = txn ? txn->srv_cookie : NULL;
 				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
 				if (ret == NULL)
 					goto out;
@@ -1574,8 +1576,8 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 			case LOG_FMT_TERMSTATE_CK: // %tsc, same as TS with cookie state (for mode HTTP)
 				LOGCHAR(sess_term_cond[(s->flags & SF_ERR_MASK) >> SF_ERR_SHIFT]);
 				LOGCHAR(sess_fin_state[(s->flags & SF_FINST_MASK) >> SF_FINST_SHIFT]);
-				LOGCHAR((be->ck_opts & PR_CK_ANY) ? sess_cookie[(txn->flags & TX_CK_MASK) >> TX_CK_SHIFT] : '-');
-				LOGCHAR((be->ck_opts & PR_CK_ANY) ? sess_set_cookie[(txn->flags & TX_SCK_MASK) >> TX_SCK_SHIFT] : '-');
+				LOGCHAR((txn && (be->ck_opts & PR_CK_ANY)) ? sess_cookie[(txn->flags & TX_CK_MASK) >> TX_CK_SHIFT] : '-');
+				LOGCHAR((txn && (be->ck_opts & PR_CK_ANY)) ? sess_set_cookie[(txn->flags & TX_SCK_MASK) >> TX_SCK_SHIFT] : '-');
 				last_isspace = 0;
 				break;
 
@@ -1740,7 +1742,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				/* Request */
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
-				uri = txn->uri ? txn->uri : "<BADREQ>";
+				uri = txn && txn->uri ? txn->uri : "<BADREQ>";
 				ret = encode_string(tmplog, dst + maxsize,
 						       '#', url_encode_map, uri);
 				if (ret == NULL || *ret != '\0')
@@ -1752,7 +1754,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_HTTP_PATH: // %HP
-				uri = txn->uri ? txn->uri : "<BADREQ>";
+				uri = txn && txn->uri ? txn->uri : "<BADREQ>";
 
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
@@ -1772,7 +1774,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				while (spc < end && *spc != '?' && !HTTP_IS_SPHT(*spc))
 					spc++;
 
-				if (!txn->uri || nspaces == 0) {
+				if (!txn || !txn->uri || nspaces == 0) {
 					chunk.str = "<BADREQ>";
 					chunk.len = strlen("<BADREQ>");
 				} else {
@@ -1795,7 +1797,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
 
-				if (!txn->uri) {
+				if (!txn || !txn->uri) {
 					chunk.str = "<BADREQ>";
 					chunk.len = strlen("<BADREQ>");
 				} else {
@@ -1826,7 +1828,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_HTTP_URI: // %HU
-				uri = txn->uri ? txn->uri : "<BADREQ>";
+				uri = txn && txn->uri ? txn->uri : "<BADREQ>";
 
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
@@ -1846,7 +1848,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				while (spc < end && !HTTP_IS_SPHT(*spc))
 					spc++;
 
-				if (!txn->uri || nspaces == 0) {
+				if (!txn || !txn->uri || nspaces == 0) {
 					chunk.str = "<BADREQ>";
 					chunk.len = strlen("<BADREQ>");
 				} else {
@@ -1866,7 +1868,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_HTTP_METHOD: // %HM
-				uri = txn->uri ? txn->uri : "<BADREQ>";
+				uri = txn && txn->uri ? txn->uri : "<BADREQ>";
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
 
@@ -1896,7 +1898,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_HTTP_VERSION: // %HV
-				uri = txn->uri ? txn->uri : "<BADREQ>";
+				uri = txn && txn->uri ? txn->uri : "<BADREQ>";
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
 
@@ -1918,7 +1920,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				while (uri < end && HTTP_IS_SPHT(*uri))
 					uri++;
 
-				if (!txn->uri || nspaces == 0) {
+				if (!txn || !txn->uri || nspaces == 0) {
 					chunk.str = "<BADREQ>";
 					chunk.len = strlen("<BADREQ>");
 				} else if (uri == end) {
