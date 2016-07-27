@@ -714,7 +714,7 @@ out:
 
 #endif
 
-#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL)
+#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL && !defined LIBRESSL_VERSION_NUMBER)
 
 #define CT_EXTENSION_TYPE 18
 
@@ -1011,9 +1011,10 @@ static DH *ssl_get_tmp_dh(SSL *ssl, int export, int keylen);
 /* Create a X509 certificate with the specified servername and serial. This
  * function returns a SSL_CTX object or NULL if an error occurs. */
 static SSL_CTX *
-ssl_sock_do_create_cert(const char *servername, unsigned int serial,
-			struct bind_conf *bind_conf, SSL *ssl)
+ssl_sock_do_create_cert(const char *servername, struct bind_conf *bind_conf, SSL *ssl)
 {
+	static unsigned int serial = 0;
+
 	X509         *cacert  = bind_conf->ca_sign_cert;
 	EVP_PKEY     *capkey  = bind_conf->ca_sign_pkey;
 	SSL_CTX      *ssl_ctx = NULL;
@@ -1036,7 +1037,9 @@ ssl_sock_do_create_cert(const char *servername, unsigned int serial,
 	 * number */
 	if (X509_set_version(newcrt, 2L) != 1)
 		goto mkcert_error;
-	ASN1_INTEGER_set(X509_get_serialNumber(newcrt), serial);
+	if (!serial)
+		serial = now_ms;
+	ASN1_INTEGER_set(X509_get_serialNumber(newcrt), serial++);
 
 	/* Set duration for the certificate */
 	if (!X509_gmtime_adj(X509_get_notBefore(newcrt), (long)-60*60*24) ||
@@ -1089,12 +1092,16 @@ ssl_sock_do_create_cert(const char *servername, unsigned int serial,
 	else if (EVP_PKEY_type (capkey->type) == EVP_PKEY_EC)
 		digest = EVP_sha256();
 	else {
+#if (OPENSSL_VERSION_NUMBER >= 0x1000000fL)
 		int nid;
 
 		if (EVP_PKEY_get_default_digest_nid(capkey, &nid) <= 0)
 			goto mkcert_error;
 		if (!(digest = EVP_get_digestbynid(nid)))
 			goto mkcert_error;
+#else
+		goto mkcert_error;
+#endif
 	}
 
 	if (!(X509_sign(newcrt, capkey, digest)))
@@ -1137,21 +1144,22 @@ ssl_sock_do_create_cert(const char *servername, unsigned int serial,
 }
 
 SSL_CTX *
-ssl_sock_create_cert(struct connection *conn, const char *servername, unsigned int serial)
+ssl_sock_create_cert(struct connection *conn, const char *servername, unsigned int key)
 {
 	struct bind_conf *bind_conf = objt_listener(conn->target)->bind_conf;
-	return ssl_sock_do_create_cert(servername, serial, bind_conf, conn->xprt_ctx);
+
+	return ssl_sock_do_create_cert(servername, bind_conf, conn->xprt_ctx);
 }
 
 /* Do a lookup for a certificate in the LRU cache used to store generated
  * certificates. */
 SSL_CTX *
-ssl_sock_get_generated_cert(unsigned int serial, struct bind_conf *bind_conf)
+ssl_sock_get_generated_cert(unsigned int key, struct bind_conf *bind_conf)
 {
 	struct lru64 *lru = NULL;
 
 	if (ssl_ctx_lru_tree) {
-		lru = lru64_lookup(serial, ssl_ctx_lru_tree, bind_conf->ca_sign_cert, 0);
+		lru = lru64_lookup(key, ssl_ctx_lru_tree, bind_conf->ca_sign_cert, 0);
 		if (lru && lru->domain)
 			return (SSL_CTX *)lru->data;
 	}
@@ -1161,12 +1169,12 @@ ssl_sock_get_generated_cert(unsigned int serial, struct bind_conf *bind_conf)
 /* Set a certificate int the LRU cache used to store generated
  * certificate. Return 0 on success, otherwise -1 */
 int
-ssl_sock_set_generated_cert(SSL_CTX *ssl_ctx, unsigned int serial, struct bind_conf *bind_conf)
+ssl_sock_set_generated_cert(SSL_CTX *ssl_ctx, unsigned int key, struct bind_conf *bind_conf)
 {
 	struct lru64 *lru = NULL;
 
 	if (ssl_ctx_lru_tree) {
-		lru = lru64_get(serial, ssl_ctx_lru_tree, bind_conf->ca_sign_cert, 0);
+		lru = lru64_get(key, ssl_ctx_lru_tree, bind_conf->ca_sign_cert, 0);
 		if (!lru)
 			return -1;
 		if (lru->domain && lru->data)
@@ -1177,9 +1185,9 @@ ssl_sock_set_generated_cert(SSL_CTX *ssl_ctx, unsigned int serial, struct bind_c
 	return -1;
 }
 
-/* Compute the serial that will be used to create/set/get a certificate. */
+/* Compute the key of the certificate. */
 unsigned int
-ssl_sock_generated_cert_serial(const void *data, size_t len)
+ssl_sock_generated_cert_key(const void *data, size_t len)
 {
 	return XXH32(data, len, ssl_ctx_lru_seed);
 }
@@ -1193,21 +1201,21 @@ ssl_sock_generate_certificate(const char *servername, struct bind_conf *bind_con
 	X509         *cacert  = bind_conf->ca_sign_cert;
 	SSL_CTX      *ssl_ctx = NULL;
 	struct lru64 *lru     = NULL;
-	unsigned int  serial;
+	unsigned int  key;
 
-	serial = ssl_sock_generated_cert_serial(servername, strlen(servername));
+	key = ssl_sock_generated_cert_key(servername, strlen(servername));
 	if (ssl_ctx_lru_tree) {
-		lru = lru64_get(serial, ssl_ctx_lru_tree, cacert, 0);
+		lru = lru64_get(key, ssl_ctx_lru_tree, cacert, 0);
 		if (lru && lru->domain)
 			ssl_ctx = (SSL_CTX *)lru->data;
 		if (!ssl_ctx && lru) {
-			ssl_ctx = ssl_sock_do_create_cert(servername, serial, bind_conf, ssl);
+			ssl_ctx = ssl_sock_do_create_cert(servername, bind_conf, ssl);
 			lru64_commit(lru, ssl_ctx, cacert, 0, (void (*)(void *))SSL_CTX_free);
 		}
 		SSL_set_SSL_CTX(ssl, ssl_ctx);
 	}
 	else {
-		ssl_ctx = ssl_sock_do_create_cert(servername, serial, bind_conf, ssl);
+		ssl_ctx = ssl_sock_do_create_cert(servername, bind_conf, ssl);
 		SSL_set_SSL_CTX(ssl, ssl_ctx);
 		/* No LRU cache, this CTX will be released as soon as the session dies */
 		SSL_CTX_free(ssl_ctx);
@@ -1231,13 +1239,13 @@ static int ssl_sock_switchctx_cbk(SSL *ssl, int *al, struct bind_conf *s)
 	if (!servername) {
 		if (s->generate_certs) {
 			struct connection *conn = (struct connection *)SSL_get_app_data(ssl);
-			unsigned int serial;
+			unsigned int key;
 			SSL_CTX *ctx;
 
 			conn_get_to_addr(conn);
 			if (conn->flags & CO_FL_ADDR_TO_SET) {
-				serial = ssl_sock_generated_cert_serial(&conn->addr.to, get_addr_len(&conn->addr.to));
-				ctx = ssl_sock_get_generated_cert(serial, s);
+				key = ssl_sock_generated_cert_key(&conn->addr.to, get_addr_len(&conn->addr.to));
+				ctx = ssl_sock_get_generated_cert(key, s);
 				if (ctx) {
 					/* switch ctx */
 					SSL_set_SSL_CTX(ssl, ctx);
@@ -1732,7 +1740,7 @@ static int ssl_sock_load_cert_file(const char *path, struct bind_conf *bind_conf
 	}
 #endif
 
-#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL)
+#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL && !defined LIBRESSL_VERSION_NUMBER)
 	if (sctl_ex_index >= 0) {
 		ret = ssl_sock_load_sctl(ctx, path);
 		if (ret < 0) {
@@ -3955,8 +3963,8 @@ smp_fetch_ssl_x_key_alg(const struct arg *args, struct sample *smp, const char *
 static int
 smp_fetch_ssl_fc(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	int back_conn = (kw[4] == 'b') ? 1 : 0;
-	struct connection *conn = objt_conn(smp->strm->si[back_conn].end);
+	struct connection *conn = objt_conn((kw[4] != 'b') ? smp->sess->origin :
+	                                    smp->strm ? smp->strm->si[1].end : NULL);
 
 	smp->data.type = SMP_T_BOOL;
 	smp->data.u.sint = (conn && conn->xprt == &ssl_sock);
@@ -4000,12 +4008,10 @@ smp_fetch_ssl_fc_is_resumed(const struct arg *args, struct sample *smp, const ch
 static int
 smp_fetch_ssl_fc_cipher(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	int back_conn = (kw[4] == 'b') ? 1 : 0;
-	struct connection *conn;
+	struct connection *conn = objt_conn((kw[4] != 'b') ? smp->sess->origin :
+	                                    smp->strm ? smp->strm->si[1].end : NULL);
 
 	smp->flags = 0;
-
-	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -4028,13 +4034,12 @@ smp_fetch_ssl_fc_cipher(const struct arg *args, struct sample *smp, const char *
 static int
 smp_fetch_ssl_fc_alg_keysize(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	int back_conn = (kw[4] == 'b') ? 1 : 0;
-	struct connection *conn;
+	struct connection *conn = objt_conn((kw[4] != 'b') ? smp->sess->origin :
+	                                    smp->strm ? smp->strm->si[1].end : NULL);
+
 	int sint;
 
 	smp->flags = 0;
-
-	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -4054,12 +4059,10 @@ smp_fetch_ssl_fc_alg_keysize(const struct arg *args, struct sample *smp, const c
 static int
 smp_fetch_ssl_fc_use_keysize(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	int back_conn = (kw[4] == 'b') ? 1 : 0;
-	struct connection *conn;
+	struct connection *conn = objt_conn((kw[4] != 'b') ? smp->sess->origin :
+	                                    smp->strm ? smp->strm->si[1].end : NULL);
 
 	smp->flags = 0;
-
-	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -4127,12 +4130,10 @@ smp_fetch_ssl_fc_alpn(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_ssl_fc_protocol(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	int back_conn = (kw[4] == 'b') ? 1 : 0;
-	struct connection *conn;
+	struct connection *conn = objt_conn((kw[4] != 'b') ? smp->sess->origin :
+	                                    smp->strm ? smp->strm->si[1].end : NULL);
 
 	smp->flags = 0;
-
-	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -4155,14 +4156,14 @@ static int
 smp_fetch_ssl_fc_session_id(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 #if OPENSSL_VERSION_NUMBER > 0x0090800fL
-	int back_conn = (kw[4] == 'b') ? 1 : 0;
+	struct connection *conn = objt_conn((kw[4] != 'b') ? smp->sess->origin :
+	                                    smp->strm ? smp->strm->si[1].end : NULL);
+
 	SSL_SESSION *ssl_sess;
-	struct connection *conn;
 
 	smp->flags = SMP_F_CONST;
 	smp->data.type = SMP_T_BIN;
 
-	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -4208,14 +4209,13 @@ static int
 smp_fetch_ssl_fc_unique_id(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 #if OPENSSL_VERSION_NUMBER > 0x0090800fL
-	int back_conn = (kw[4] == 'b') ? 1 : 0;
-	struct connection *conn;
+	struct connection *conn = objt_conn((kw[4] != 'b') ? smp->sess->origin :
+	                                    smp->strm ? smp->strm->si[1].end : NULL);
+
 	int finished_len;
 	struct chunk *finished_trash;
 
 	smp->flags = 0;
-
-	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -4613,9 +4613,12 @@ static int bind_parse_npn(char **args, int cur_arg, struct proxy *px, struct bin
 
 	free(conf->npn_str);
 
-	/* the NPN string is built as a suite of (<len> <name>)* */
+	/* the NPN string is built as a suite of (<len> <name>)*,
+	 * so we reuse each comma to store the next <len> and need
+	 * one more for the end of the string.
+	 */
 	conf->npn_len = strlen(args[cur_arg + 1]) + 1;
-	conf->npn_str = calloc(1, conf->npn_len);
+	conf->npn_str = calloc(1, conf->npn_len + 1);
 	memcpy(conf->npn_str + 1, args[cur_arg + 1], conf->npn_len);
 
 	/* replace commas with the name length */
@@ -4661,9 +4664,12 @@ static int bind_parse_alpn(char **args, int cur_arg, struct proxy *px, struct bi
 
 	free(conf->alpn_str);
 
-	/* the ALPN string is built as a suite of (<len> <name>)* */
+	/* the ALPN string is built as a suite of (<len> <name>)*,
+	 * so we reuse each comma to store the next <len> and need
+	 * one more for the end of the string.
+	 */
 	conf->alpn_len = strlen(args[cur_arg + 1]) + 1;
-	conf->alpn_str = calloc(1, conf->alpn_len);
+	conf->alpn_str = calloc(1, conf->alpn_len + 1);
 	memcpy(conf->alpn_str + 1, args[cur_arg + 1], conf->alpn_len);
 
 	/* replace commas with the name length */
@@ -4776,6 +4782,7 @@ static int bind_parse_tls_ticket_keys(char **args, int cur_arg, struct proxy *px
 		if (base64dec(thisline, len, (char *) (keys_ref->tlskeys + i % TLS_TICKETS_NO), sizeof(struct tls_sess_key)) != sizeof(struct tls_sess_key)) {
 			if (err)
 				memprintf(err, "'%s' : unable to decode base64 key on line %d", args[cur_arg+1], i + 1);
+			fclose(f);
 			return ERR_ALERT | ERR_FATAL;
 		}
 		i++;
@@ -4784,14 +4791,15 @@ static int bind_parse_tls_ticket_keys(char **args, int cur_arg, struct proxy *px
 	if (i < TLS_TICKETS_NO) {
 		if (err)
 			memprintf(err, "'%s' : please supply at least %d keys in the tls-tickets-file", args[cur_arg+1], TLS_TICKETS_NO);
+		fclose(f);
 		return ERR_ALERT | ERR_FATAL;
 	}
 
 	fclose(f);
 
 	/* Use penultimate key for encryption, handle when TLS_TICKETS_NO = 1 */
-	i-=2;
-	keys_ref->tls_ticket_enc_index = i < 0 ? 0 : i;
+	i -= 2;
+	keys_ref->tls_ticket_enc_index = i < 0 ? 0 : i % TLS_TICKETS_NO;
 	keys_ref->unique_id = -1;
 	conf->keys_ref = keys_ref;
 
@@ -5017,6 +5025,7 @@ static int srv_parse_sni(char **args, int *cur_arg, struct proxy *px, struct ser
 	memprintf(err, "'%s' : the current SSL library doesn't support the SNI TLS extension", args[*cur_arg]);
 	return ERR_ALERT | ERR_FATAL;
 #else
+	int idx;
 	struct sample_expr *expr;
 
 	if (!*args[*cur_arg + 1]) {
@@ -5024,10 +5033,10 @@ static int srv_parse_sni(char **args, int *cur_arg, struct proxy *px, struct ser
 		return ERR_ALERT | ERR_FATAL;
 	}
 
-	(*cur_arg)++;
+	idx = (*cur_arg) + 1;
 	proxy->conf.args.ctx = ARGC_SRV;
 
-	expr = sample_parse_expr((char **)args, cur_arg, px->conf.file, px->conf.line, err, &proxy->conf.args);
+	expr = sample_parse_expr((char **)args, &idx, px->conf.file, px->conf.line, err, &proxy->conf.args);
 	if (!expr) {
 		memprintf(err, "error detected while parsing sni expression : %s", *err);
 		return ERR_ALERT | ERR_FATAL;
@@ -5036,7 +5045,7 @@ static int srv_parse_sni(char **args, int *cur_arg, struct proxy *px, struct ser
 	if (!(expr->fetch->val & SMP_VAL_BE_SRV_CON)) {
 		memprintf(err, "error detected while parsing sni expression : "
 		          " fetch method '%s' extracts information from '%s', none of which is available here.\n",
-		          args[*cur_arg-1], sample_src_names(expr->fetch->use));
+		          args[idx-1], sample_src_names(expr->fetch->use));
 		return ERR_ALERT | ERR_FATAL;
 	}
 
@@ -5344,7 +5353,7 @@ struct xprt_ops ssl_sock = {
 	.init     = ssl_sock_init,
 };
 
-#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL)
+#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL && !defined LIBRESSL_VERSION_NUMBER)
 
 static void ssl_sock_sctl_free_func(void *parent, void *ptr, CRYPTO_EX_DATA *ad, int idx, long argl, void *argp)
 {
@@ -5377,7 +5386,7 @@ static void __ssl_sock_init(void)
 	SSL_library_init();
 	cm = SSL_COMP_get_compression_methods();
 	sk_SSL_COMP_zero(cm);
-#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL)
+#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL && !defined LIBRESSL_VERSION_NUMBER)
 	sctl_ex_index = SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, ssl_sock_sctl_free_func);
 #endif
 	sample_register_fetches(&sample_fetch_keywords);

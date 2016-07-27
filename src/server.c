@@ -819,11 +819,11 @@ const char *server_parse_addr_change_request(struct server *sv,
 	unsigned char ip[INET6_ADDRSTRLEN];
 
 	if (inet_pton(AF_INET6, addr_str, ip)) {
-		update_server_addr(sv, ip, AF_INET6, "stats command\n");
+		update_server_addr(sv, ip, AF_INET6, "stats command");
 		return NULL;
 	}
 	if (inet_pton(AF_INET, addr_str, ip)) {
-		update_server_addr(sv, ip, AF_INET, "stats command\n");
+		update_server_addr(sv, ip, AF_INET, "stats command");
 		return NULL;
 	}
 
@@ -1688,7 +1688,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			if (!newsrv->check.port &&
 			    (is_inet_addr(&newsrv->check.addr) ||
 			     (!is_addr(&newsrv->check.addr) && is_inet_addr(&newsrv->addr)))) {
-				struct tcpcheck_rule *n = NULL, *r = NULL;
+				struct tcpcheck_rule *r = NULL;
 				struct list *l;
 
 				r = (struct tcpcheck_rule *)newsrv->proxy->tcpcheck_rules.n;
@@ -1697,6 +1697,12 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 					      file, linenum, newsrv->id);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
+				}
+				/* search the first action (connect / send / expect) in the list */
+				l = &newsrv->proxy->tcpcheck_rules;
+				list_for_each_entry(r, l, list) {
+					if (r->action != TCPCHK_ACT_COMMENT)
+						break;
 				}
 				if ((r->action != TCPCHK_ACT_CONNECT) || !r->port) {
 					Alert("parsing [%s:%d] : server %s has neither service port nor check port nor tcp_check rule 'connect' with port information. Check has been disabled.\n",
@@ -1707,8 +1713,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 				else {
 					/* scan the tcp-check ruleset to ensure a port has been configured */
 					l = &newsrv->proxy->tcpcheck_rules;
-					list_for_each_entry(n, l, list) {
-						r = (struct tcpcheck_rule *)n->list.p;
+					list_for_each_entry(r, l, list) {
 						if ((r->action == TCPCHK_ACT_CONNECT) && (!r->port)) {
 							Alert("parsing [%s:%d] : server %s has neither service port nor check port, and a tcp_check rule 'connect' with no port information. Check has been disabled.\n",
 							      file, linenum, newsrv->id);
@@ -1903,7 +1908,6 @@ static void srv_update_state(struct server *srv, int version, char **params)
 	/* fields since version 1
 	 * and common to all other upcoming versions
 	 */
-	struct sockaddr_storage addr;
 	enum srv_state srv_op_state;
 	enum srv_admin srv_admin_state;
 	unsigned srv_uweight, srv_iweight;
@@ -2137,9 +2141,19 @@ static void srv_update_state(struct server *srv, int version, char **params)
 
 			/* update server IP only if DNS resolution is used on the server */
 			if (srv->resolution) {
+				struct sockaddr_storage addr;
+
 				memset(&addr, 0, sizeof(struct sockaddr_storage));
-				if (str2ip2(params[0], &addr, 0))
-					memcpy(&srv->addr, &addr, sizeof(struct sockaddr_storage));
+
+				if (str2ip2(params[0], &addr, AF_UNSPEC)) {
+					int port;
+
+					/* save the port, applies the new IP then reconfigure the port */
+					port = get_host_port(&srv->addr);
+					srv->addr.ss_family = addr.ss_family;
+					str2ip2(params[0], &srv->addr, srv->addr.ss_family);
+					set_host_port(&srv->addr, port);
+				}
 				else
 					chunk_appendf(msg, ", can't parse IP: %s", params[0]);
 			}
@@ -2149,9 +2163,11 @@ static void srv_update_state(struct server *srv, int version, char **params)
 	}
 
  out:
-	if (msg->len)
+	if (msg->len) {
+		chunk_appendf(msg, "\n");
 		Warning("server-state application failed for server '%s/%s'%s",
 		        srv->proxy->id, srv->id, msg->str);
+	}
 }
 
 /* This function parses all the proxies and only take care of the backends (since we're looking for server)
@@ -2319,12 +2335,16 @@ void apply_server_state(void)
 		version = 0;
 
 		/* first character of first line of the file must contain the version of the export */
-		fgets(mybuf, SRV_STATE_LINE_MAXLEN, f);
+		if (fgets(mybuf, SRV_STATE_LINE_MAXLEN, f) == NULL) {
+			Warning("Can't read first line of the server state file '%s'\n", filepath);
+			goto fileclose;
+		}
+
 		cur = mybuf;
 		version = atoi(cur);
 		if ((version < SRV_STATE_FILE_VERSION_MIN) ||
 		    (version > SRV_STATE_FILE_VERSION_MAX))
-			continue;
+			goto fileclose;
 
 		while (fgets(mybuf, SRV_STATE_LINE_MAXLEN, f)) {
 			int bk_f_forced_id = 0;
@@ -2451,6 +2471,7 @@ void apply_server_state(void)
 			/* now we can proceed with server's state update */
 			srv_update_state(srv, version, srv_params);
 		}
+fileclose:
 		fclose(f);
 	}
 }
@@ -2511,7 +2532,7 @@ int update_server_addr(struct server *s, void *ip, int ip_sin_family, char *upda
 	/* save the new IP address */
 	switch (ip_sin_family) {
 	case AF_INET:
-		((struct sockaddr_in *)&s->addr)->sin_addr.s_addr = *(uint32_t *)ip;
+		memcpy(&((struct sockaddr_in *)&s->addr)->sin_addr.s_addr, ip, 4);
 		break;
 	case AF_INET6:
 		memcpy(((struct sockaddr_in6 *)&s->addr)->sin6_addr.s6_addr, ip, 16);
@@ -2614,6 +2635,17 @@ int snr_resolution_cb(struct dns_resolution *resolution, struct dns_nameserver *
 			goto invalid;
 
 		case DNS_UPD_NO_IP_FOUND:
+			if (resolution->status != RSLV_STATUS_OTHER) {
+				resolution->status = RSLV_STATUS_OTHER;
+				resolution->last_status_change = now_ms;
+			}
+			goto stop_resolution;
+
+		case DNS_UPD_NAME_ERROR:
+			/* if this is not the last expected response, we ignore it */
+			if (resolution->nb_responses < nameserver->resolvers->count_nameservers)
+				return 0;
+			/* update resolution status to OTHER error type */
 			if (resolution->status != RSLV_STATUS_OTHER) {
 				resolution->status = RSLV_STATUS_OTHER;
 				resolution->last_status_change = now_ms;

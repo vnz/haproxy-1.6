@@ -110,7 +110,7 @@ void http_set_status(unsigned int status, struct stream *s);
 int http_transform_header_str(struct stream* s, struct http_msg *msg, const char* name,
                               unsigned int name_len, const char *str, struct my_regex *re,
                               int action);
-void inet_set_tos(int fd, struct sockaddr_storage from, int tos);
+void inet_set_tos(int fd, const struct sockaddr_storage *from, int tos);
 void http_perform_server_redirect(struct stream *s, struct stream_interface *si);
 void http_return_srv_error(struct stream *s, struct stream_interface *si);
 void http_capture_bad_message(struct error_snapshot *es, struct stream *s,
@@ -146,6 +146,11 @@ int val_hdr(struct arg *arg, char **err_msg);
 
 int smp_prefetch_http(struct proxy *px, struct stream *s, unsigned int opt,
                   const struct arg *args, struct sample *smp, int req_vol);
+
+enum act_return http_action_req_capture_by_id(struct act_rule *rule, struct proxy *px,
+                                              struct session *sess, struct stream *s, int flags);
+enum act_return http_action_res_capture_by_id(struct act_rule *rule, struct proxy *px,
+                                              struct session *sess, struct stream *s, int flags);
 
 /* Note: these functions *do* modify the sample. Even in case of success, at
  * least the type and uint value are modified.

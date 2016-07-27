@@ -1,6 +1,6 @@
 /*
  * HA-Proxy : High Availability-enabled HTTP/TCP proxy
- * Copyright 2000-2015  Willy Tarreau <w@1wt.eu>.
+ * Copyright 2000-2016 Willy Tarreau <willy@haproxy.org>.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -25,6 +25,7 @@
  *
  */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -47,9 +48,7 @@
 #include <syslog.h>
 #include <grp.h>
 #ifdef USE_CPU_AFFINITY
-#define __USE_GNU
 #include <sched.h>
-#undef __USE_GNU
 #ifdef __FreeBSD__
 #include <sys/param.h>
 #include <sys/cpuset.h>
@@ -134,7 +133,7 @@ struct global global = {
 	.nbproc = 1,
 	.req_count = 0,
 	.logsrvs = LIST_HEAD_INIT(global.logsrvs),
-#ifdef DEFAULT_MAXZLIBMEM
+#if defined(USE_ZLIB) && defined(DEFAULT_MAXZLIBMEM)
 	.maxzlibmem = DEFAULT_MAXZLIBMEM * 1024U * 1024U,
 #else
 	.maxzlibmem = 0,
@@ -180,7 +179,7 @@ struct global global = {
 #endif
 #ifdef USE_DEVICEATLAS
 	.deviceatlas = {
-		.loglevel = DA_SEV_INFO,
+		.loglevel = 0,
 		.jsonpath = 0,
 		.cookiename = 0,
 		.cookienamelen = 0,
@@ -252,7 +251,7 @@ unsigned int warned = 0;
 void display_version()
 {
 	printf("HA-Proxy version " HAPROXY_VERSION " " HAPROXY_DATE"\n");
-	printf("Copyright 2000-2015 Willy Tarreau <willy@haproxy.org>\n\n");
+	printf("Copyright 2000-2016 Willy Tarreau <willy@haproxy.org>\n\n");
 }
 
 void display_build_opts()
@@ -400,6 +399,9 @@ void display_build_opts()
 	printf("Built with network namespace support\n");
 #endif
 
+#ifdef USE_DEVICEATLAS
+    printf("Built with DeviceAtlas support\n");
+#endif
 #ifdef USE_51DEGREES
 	printf("Built with 51Degrees support\n");
 #endif
@@ -557,7 +559,6 @@ void init(int argc, char **argv)
 	struct wordlist *wl;
 	char *progname;
 	char *change_dir = NULL;
-	struct tm curtime;
 
 	chunk_init(&trash, malloc(global.tune.bufsize), global.tune.bufsize);
 	alloc_trash_buffers(global.tune.bufsize);
@@ -579,17 +580,14 @@ void init(int argc, char **argv)
     
 
 #ifdef HAPROXY_MEMMAX
-	global.rlimit_memmax = HAPROXY_MEMMAX;
+	global.rlimit_memmax_all = HAPROXY_MEMMAX;
 #endif
 
+	tzset();
 	tv_update_date(-1,-1);
 	start_date = now;
 
 	srandom(now_ms - getpid());
-
-	/* Get the numeric timezone. */
-	get_localtime(start_date.tv_sec, &curtime);
-	strftime(localtimezone, 6, "%z", &curtime);
 
 	signal_init();
 	if (init_acl() != 0)
@@ -727,7 +725,7 @@ void init(int argc, char **argv)
 				switch (*flag) {
 				case 'C' : change_dir = *argv; break;
 				case 'n' : cfg_maxconn = atol(*argv); break;
-				case 'm' : global.rlimit_memmax = atol(*argv); break;
+				case 'm' : global.rlimit_memmax_all = atol(*argv); break;
 				case 'N' : cfg_maxpconn = atol(*argv); break;
 				case 'L' : strncpy(localpeer, *argv, sizeof(localpeer) - 1); break;
 				case 'f' :
@@ -790,6 +788,22 @@ void init(int argc, char **argv)
 	if (err_code & (ERR_ABORT|ERR_FATAL)) {
 		Alert("Fatal errors found in configuration.\n");
 		exit(1);
+	}
+
+	/* recompute the amount of per-process memory depending on nbproc and
+	 * the shared SSL cache size (allowed to exist in all processes).
+	 */
+	if (global.rlimit_memmax_all) {
+#if defined (USE_OPENSSL) && !defined(USE_PRIVATE_CACHE)
+		int64_t ssl_cache_bytes = global.tune.sslcachesize * 200LL;
+
+		global.rlimit_memmax =
+			((((int64_t)global.rlimit_memmax_all * 1048576LL) -
+			  ssl_cache_bytes) / global.nbproc +
+			 ssl_cache_bytes + 1048575LL) / 1048576LL;
+#else
+		global.rlimit_memmax = global.rlimit_memmax_all / global.nbproc;
+#endif
 	}
 
 #ifdef CONFIG_HAP_NS
@@ -1636,13 +1650,20 @@ int main(int argc, char **argv)
 	if (global.rlimit_nofile) {
 		limit.rlim_cur = limit.rlim_max = global.rlimit_nofile;
 		if (setrlimit(RLIMIT_NOFILE, &limit) == -1) {
-			Warning("[%s.main()] Cannot raise FD limit to %d.\n", argv[0], global.rlimit_nofile);
+			/* try to set it to the max possible at least */
+			getrlimit(RLIMIT_NOFILE, &limit);
+			limit.rlim_cur = limit.rlim_max;
+			if (setrlimit(RLIMIT_NOFILE, &limit) != -1)
+				getrlimit(RLIMIT_NOFILE, &limit);
+
+			Warning("[%s.main()] Cannot raise FD limit to %d, limit is %d.\n", argv[0], global.rlimit_nofile, (int)limit.rlim_cur);
+			global.rlimit_nofile = limit.rlim_cur;
 		}
 	}
 
 	if (global.rlimit_memmax) {
 		limit.rlim_cur = limit.rlim_max =
-			global.rlimit_memmax * 1048576 / global.nbproc;
+			global.rlimit_memmax * 1048576ULL;
 #ifdef RLIMIT_AS
 		if (setrlimit(RLIMIT_AS, &limit) == -1) {
 			Warning("[%s.main()] Cannot fix MEM limit to %d megs.\n",

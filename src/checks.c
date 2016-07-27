@@ -58,6 +58,7 @@
 #include <proto/proxy.h>
 #include <proto/raw_sock.h>
 #include <proto/server.h>
+#include <proto/signal.h>
 #include <proto/stream_interface.h>
 #include <proto/task.h>
 #include <proto/log.h>
@@ -1521,14 +1522,15 @@ void block_sigchld(void)
 	sigset_t set;
 	sigemptyset(&set);
 	sigaddset(&set, SIGCHLD);
-	assert(sigprocmask(SIG_SETMASK, &set, NULL) == 0);
+	assert(sigprocmask(SIG_BLOCK, &set, NULL) == 0);
 }
 
 void unblock_sigchld(void)
 {
 	sigset_t set;
 	sigemptyset(&set);
-	assert(sigprocmask(SIG_SETMASK, &set, NULL) == 0);
+	sigaddset(&set, SIGCHLD);
+	assert(sigprocmask(SIG_UNBLOCK, &set, NULL) == 0);
 }
 
 /* Call with SIGCHLD blocked */
@@ -1584,25 +1586,22 @@ static void pid_list_expire(pid_t pid, int status)
 	}
 }
 
-static void sigchld_handler(int signal)
+static void sigchld_handler(struct sig_handler *sh)
 {
 	pid_t pid;
 	int status;
+
 	while ((pid = waitpid(0, &status, WNOHANG)) > 0)
 		pid_list_expire(pid, status);
 }
 
-static int init_pid_list(void) {
-	struct sigaction action = {
-		.sa_handler = sigchld_handler,
-		.sa_flags = SA_NOCLDSTOP
-	};
-
+static int init_pid_list(void)
+{
 	if (pool2_pid_list != NULL)
 		/* Nothing to do */
 		return 0;
 
-	if (sigaction(SIGCHLD, &action, NULL)) {
+	if (!signal_register_fct(SIGCHLD, sigchld_handler, SIGCHLD)) {
 		Alert("Failed to set signal handler for external health checks: %s. Aborting.\n",
 		      strerror(errno));
 		return 1;
@@ -1817,6 +1816,14 @@ static int connect_proc_chk(struct task *t)
 	if (pid == 0) {
 		/* Child */
 		extern char **environ;
+		int fd;
+
+		/* close all FDs. Keep stdin/stdout/stderr in verbose mode */
+		fd = (global.mode & (MODE_QUIET|MODE_VERBOSE)) == MODE_QUIET ? 0 : 3;
+
+		while (fd < global.rlimit_nofile)
+			close(fd++);
+
 		environ = check->envp;
 		extchk_setenv(check, EXTCHK_HAPROXY_SERVER_CURCONN, ultoa_r(s->cur_sess, buf, sizeof(buf)));
 		execvp(px->check_command, check->argv);
@@ -3104,7 +3111,7 @@ static int init_email_alert_checks(struct server *s)
 
 		LIST_INIT(&q->email_alerts);
 
-		check->inter = DEF_CHKINTR; /* XXX: Would like to Skip to the next alert, if any, ASAP.
+		check->inter = DEF_MAILALERTTIME; /* XXX: Would like to Skip to the next alert, if any, ASAP.
 					     * But need enough time so that timeouts don't occur
 					     * during tcp check procssing. For now just us an arbitrary default. */
 		check->rise = DEF_AGENT_RISETIME;
@@ -3245,12 +3252,12 @@ static int enqueue_one_email_alert(struct email_alertq *q, const char *msg)
 		struct tm tm;
 		char datestr[48];
 		const char * const strs[18] = {
-			"From: ", p->email_alert.from, "\n",
-			"To: ", p->email_alert.to, "\n",
-			"Date: ", datestr, "\n",
-			"Subject: [HAproxy Alert] ", msg, "\n",
-			"\n",
-			msg, "\n",
+			"From: ", p->email_alert.from, "\r\n",
+			"To: ", p->email_alert.to, "\r\n",
+			"Date: ", datestr, "\r\n",
+			"Subject: [HAproxy Alert] ", msg, "\r\n",
+			"\r\n",
+			msg, "\r\n",
 			"\r\n",
 			".\r\n",
 			NULL
@@ -3338,7 +3345,7 @@ void send_email_alert(struct server *s, int level, const char *format, ...)
 	va_end(argp);
 
 	if (len < 0) {
-		Alert("Email alert [%s] could format message\n", p->id);
+		Alert("Email alert [%s] could not format message\n", p->id);
 		return;
 	}
 

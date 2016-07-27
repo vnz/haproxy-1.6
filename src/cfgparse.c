@@ -285,7 +285,7 @@ int str2listener(char *str, struct proxy *curproxy, struct bind_conf *bind_conf,
 		}
 
 		/* OK the address looks correct */
-		ss = *ss2;
+		memcpy(&ss, ss2, sizeof(ss));
 
 		for (; port <= end; port++) {
 			l = (struct listener *)calloc(1, sizeof(struct listener));
@@ -296,7 +296,7 @@ int str2listener(char *str, struct proxy *curproxy, struct bind_conf *bind_conf,
 			l->bind_conf = bind_conf;
 
 			l->fd = fd;
-			l->addr = ss;
+			memcpy(&l->addr, &ss, sizeof(ss));
 			l->xprt = &raw_sock;
 			l->state = LI_INIT;
 
@@ -1063,7 +1063,12 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		global.uid = atol(args[1]);
+		if (strl2irc(args[1], strlen(args[1]), &global.uid) != 0) {
+			Warning("parsing [%s:%d] :  uid: string '%s' is not a number.\n   | You might want to use the 'user' parameter to use a system user name.\n", file, linenum, args[1]);
+			err_code |= ERR_WARN;
+			goto out;
+		}
+
 	}
 	else if (!strcmp(args[0], "gid")) {
 		if (alertif_too_many_args(1, file, linenum, args, &err_code))
@@ -1078,7 +1083,11 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		global.gid = atol(args[1]);
+		if (strl2irc(args[1], strlen(args[1]), &global.gid) != 0) {
+			Warning("parsing [%s:%d] :  gid: string '%s' is not a number.\n   | You might want to use the 'group' parameter to use a system group name.\n", file, linenum, args[1]);
+			err_code |= ERR_WARN;
+			goto out;
+		}
 	}
 	else if (!strcmp(args[0], "external-check")) {
 		if (alertif_too_many_args(0, file, linenum, args, &err_code))
@@ -1571,10 +1580,10 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 
 		if (logsrv->maxlen > global.max_syslog_len) {
 			global.max_syslog_len = logsrv->maxlen;
-			logheader = realloc(logheader, global.max_syslog_len + 1);
-			logheader_rfc5424 = realloc(logheader_rfc5424, global.max_syslog_len + 1);
-			logline = realloc(logline, global.max_syslog_len + 1);
-			logline_rfc5424 = realloc(logline_rfc5424, global.max_syslog_len + 1);
+			logheader = my_realloc2(logheader, global.max_syslog_len + 1);
+			logheader_rfc5424 = my_realloc2(logheader_rfc5424, global.max_syslog_len + 1);
+			logline = my_realloc2(logline, global.max_syslog_len + 1);
+			logline_rfc5424 = my_realloc2(logline_rfc5424, global.max_syslog_len + 1);
 		}
 
 		/* after the length, a format may be specified */
@@ -1590,8 +1599,10 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			arg += 2;
 		}
 
-		if (alertif_too_many_args_idx(3, arg + 1, file, linenum, args, &err_code))
+		if (alertif_too_many_args_idx(3, arg + 1, file, linenum, args, &err_code)) {
+			free(logsrv);
 			goto out;
+		}
 
 		logsrv->facility = get_log_facility(args[arg+2]);
 		if (logsrv->facility < 0) {
@@ -2262,6 +2273,15 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
+		list_for_each_entry(newnameserver, &curr_resolvers->nameserver_list, list) {
+			/* Error if two resolvers owns the same name */
+			if (strcmp(newnameserver->id, args[1]) == 0) {
+				Alert("Parsing [%s:%d]: nameserver '%s' has same name as another nameserver (declared at %s:%d).\n",
+					file, linenum, args[1], curr_resolvers->conf.file, curr_resolvers->conf.line);
+				err_code |= ERR_ALERT | ERR_FATAL;
+			}
+		}
+
 		if ((newnameserver = (struct dns_nameserver *)calloc(1, sizeof(struct dns_nameserver))) == NULL) {
 			Alert("parsing [%s:%d] : out of memory.\n", file, linenum);
 			err_code |= ERR_ALERT | ERR_ABORT;
@@ -2294,6 +2314,13 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 		if (port1 != port2) {
 			Alert("parsing [%s:%d] : '%s %s' : port ranges and offsets are not allowed in '%s'\n",
 				file, linenum, args[0], args[1], args[2]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		if (!port1 && !port2) {
+			Alert("parsing [%s:%d] : '%s %s' : no UDP port specified\n",
+				file, linenum, args[0], args[1]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -2340,12 +2367,16 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 	else if (strcmp(args[0], "timeout") == 0) {
 		const char *res;
 		unsigned int timeout_retry;
-
-		if (!*args[2]) {
+		if (!*args[1] || !*args[2]) {
 			Alert("parsing [%s:%d] : '%s' expects 'retry' and <time> as arguments.\n",
 				file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
+		}
+		else if (strcmp(args[1], "retry") != 0) {
+			Warning("parsing [%s:%d] : '%s' expects 'retry' and <time> as arguments, got '%s'.\n",
+				file, linenum, args[0], args[1]);
+			err_code |= ERR_WARN;
 		}
 		res = parse_time_err(args[2], &timeout_retry, TIME_UNIT_MS);
 		if (res) {
@@ -2795,6 +2826,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		if (defproxy.email_alert.myhostname)
 			curproxy->email_alert.myhostname = strdup(defproxy.email_alert.myhostname);
 		curproxy->email_alert.level = defproxy.email_alert.level;
+		curproxy->email_alert.set = defproxy.email_alert.set;
 
 		goto out;
 	}
@@ -3941,6 +3973,12 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				if (err) {
 					Alert("parsing [%s:%d] : stick-table: unexpected character '%c' in argument of '%s'.\n",
 					      file, linenum, *err, args[myidx-1]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				if (val > INT_MAX) {
+					Alert("parsing [%s:%d] : Expire value [%u]ms exceeds maxmimum value of 24.85 days.\n",
+					      file, linenum, val);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
@@ -5907,10 +5945,10 @@ stats_error_parsing:
 
 			if (logsrv->maxlen > global.max_syslog_len) {
 				global.max_syslog_len = logsrv->maxlen;
-				logheader = realloc(logheader, global.max_syslog_len + 1);
-				logheader_rfc5424 = realloc(logheader_rfc5424, global.max_syslog_len + 1);
-				logline = realloc(logline, global.max_syslog_len + 1);
-				logline_rfc5424 = realloc(logline_rfc5424, global.max_syslog_len + 1);
+				logheader = my_realloc2(logheader, global.max_syslog_len + 1);
+				logheader_rfc5424 = my_realloc2(logheader_rfc5424, global.max_syslog_len + 1);
+				logline = my_realloc2(logline, global.max_syslog_len + 1);
+				logline_rfc5424 = my_realloc2(logline_rfc5424, global.max_syslog_len + 1);
 			}
 
 			/* after the length, a format may be specified */
@@ -6688,6 +6726,7 @@ cfg_parse_users(const char *file, int linenum, char **args, int kwm)
 		if (!newul->name) {
 			Alert("parsing [%s:%d]: out of memory.\n", file, linenum);
 			err_code |= ERR_ALERT | ERR_ABORT;
+			free(newul);
 			goto out;
 		}
 
@@ -6873,8 +6912,10 @@ int readcfgfile(const char *file)
 	    !cfg_register_section("resolvers", cfg_parse_resolvers))
 		return -1;
 
-	if ((f=fopen(file,"r")) == NULL)
+	if ((f=fopen(file,"r")) == NULL) {
+		free(thisline);
 		return -1;
+	}
 
 next_line:
 	while (fgets(thisline + readbytes, linesize - readbytes, f) != NULL) {
@@ -7460,7 +7501,7 @@ int check_config_validity()
 			    free_email_alert(curproxy);
 		    }
 		    if (!curproxy->email_alert.myhostname)
-			    curproxy->email_alert.myhostname = hostname;
+			    curproxy->email_alert.myhostname = strdup(hostname);
 		}
 
 		if (curproxy->check_command) {
@@ -7739,6 +7780,32 @@ int check_config_validity()
 				 * to pass a list of counters to track and allocate them right here using
 				 * stktable_alloc_data_type().
 				 */
+			}
+		}
+
+		/* parse http-request capture rules to ensure id really exists */
+		list_for_each_entry(hrqrule, &curproxy->http_req_rules, list) {
+			if (hrqrule->action  != ACT_CUSTOM ||
+			    hrqrule->action_ptr != http_action_req_capture_by_id)
+				continue;
+
+			if (hrqrule->arg.capid.idx >= curproxy->nb_req_cap) {
+				Alert("Proxy '%s': unable to find capture id '%d' referenced by http-request capture rule.\n",
+				      curproxy->id, hrqrule->arg.capid.idx);
+				cfgerr++;
+			}
+		}
+
+		/* parse http-response capture rules to ensure id really exists */
+		list_for_each_entry(hrqrule, &curproxy->http_res_rules, list) {
+			if (hrqrule->action  != ACT_CUSTOM ||
+			    hrqrule->action_ptr != http_action_res_capture_by_id)
+				continue;
+
+			if (hrqrule->arg.capid.idx >= curproxy->nb_rsp_cap) {
+				Alert("Proxy '%s': unable to find capture id '%d' referenced by http-response capture rule.\n",
+				      curproxy->id, hrqrule->arg.capid.idx);
+				cfgerr++;
 			}
 		}
 
@@ -8502,7 +8569,7 @@ out_uri_auth_compat:
 		list_for_each_entry(bind_conf, &global.stats_fe->conf.bind, by_fe) {
 			unsigned long mask;
 
-			mask = bind_conf->bind_proc ? bind_conf->bind_proc : nbits(global.nbproc);
+			mask = bind_conf->bind_proc ? bind_conf->bind_proc : 0;
 			global.stats_fe->bind_proc |= mask;
 		}
 		if (!global.stats_fe->bind_proc)
@@ -8535,9 +8602,6 @@ out_uri_auth_compat:
 	for (curproxy = proxy; curproxy; curproxy = curproxy->next) {
 		struct listener *listener;
 		unsigned int next_id;
-		int nbproc;
-
-		nbproc = my_popcountl(curproxy->bind_proc & nbits(global.nbproc));
 
 #ifdef USE_OPENSSL
 		/* Configure SSL for each bind line.
@@ -8582,6 +8646,15 @@ out_uri_auth_compat:
 		/* adjust this proxy's listeners */
 		next_id = 1;
 		list_for_each_entry(listener, &curproxy->conf.listeners, by_fe) {
+			int nbproc;
+
+			nbproc = my_popcountl(curproxy->bind_proc &
+			                      (listener->bind_conf->bind_proc ? listener->bind_conf->bind_proc : curproxy->bind_proc) &
+			                      nbits(global.nbproc));
+
+			if (!nbproc) /* no intersection between listener and frontend */
+				nbproc = 1;
+
 			if (!listener->luid) {
 				/* listener ID not set, use automatic numbering with first
 				 * spare entry starting with next_luid.
@@ -8655,12 +8728,13 @@ out_uri_auth_compat:
 			if(bind_conf->keys_ref) {
 				free(bind_conf->keys_ref->filename);
 				free(bind_conf->keys_ref->tlskeys);
+				LIST_DEL(&bind_conf->keys_ref->list);
 				free(bind_conf->keys_ref);
 			}
 #endif /* USE_OPENSSL */
 		}
 
-		if (nbproc > 1) {
+		if (my_popcountl(curproxy->bind_proc & nbits(global.nbproc)) > 1) {
 			if (curproxy->uri_auth) {
 				int count, maxproc = 0;
 

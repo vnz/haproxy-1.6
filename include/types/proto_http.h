@@ -28,6 +28,7 @@
 #include <common/regex.h>
 
 #include <types/hdr_idx.h>
+#include <types/sample.h>
 
 /* These are the flags that are found in txn->flags */
 
@@ -361,7 +362,6 @@ struct http_txn {
 	unsigned int flags;             /* transaction flags */
 	enum http_meth_t meth;          /* HTTP method */
 	/* 1 unused byte here */
-	short rule_deny_status;         /* HTTP status from rule when denying */
 	short status;                   /* HTTP status from the server, negative if from proxy */
 
 	char *uri;                      /* first line if log needed, NULL otherwise */

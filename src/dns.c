@@ -602,8 +602,7 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 	cname = *newip = newip4 = newip6 = NULL;
 	cnamelen = currentip_found = 0;
 	*newip_sin_family = AF_UNSPEC;
-	ancount = (((struct dns_header *)resp)->ancount);
-	ancount = *(resp + 7);
+	ancount = *(resp + 7);	/* Assume no more than 256 answers */
 
 	/* bypass DNS response header */
 	reader = resp + sizeof(struct dns_header);
@@ -628,8 +627,11 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 		else
 			ptr = reader;
 
-		if (cname && memcmp(ptr, cname, cnamelen))
-			return DNS_UPD_NAME_ERROR;
+		if (cname) {
+			if (memcmp(ptr, cname, cnamelen)) {
+				return DNS_UPD_NAME_ERROR;
+			}
+		}
 		else if (memcmp(ptr, dn_name, dn_name_len))
 			return DNS_UPD_NAME_ERROR;
 
@@ -675,8 +677,7 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 		switch (type) {
 			case DNS_RTYPE_A:
 				/* check if current reccord's IP is the same as server one's */
-				if ((currentip_sin_family == AF_INET)
-						&& (*(uint32_t *)reader == *(uint32_t *)currentip)) {
+				if ((currentip_sin_family == AF_INET) && memcmp(reader, currentip, 4) == 0) {
 					currentip_found = 1;
 					newip4 = reader;
 					/* we can stop now if server's family preference is IPv4
@@ -793,7 +794,7 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 /*
  * returns the query id contained in a DNS response
  */
-int dns_response_get_query_id(unsigned char *resp)
+unsigned short dns_response_get_query_id(unsigned char *resp)
 {
 	/* read the query id from the response */
 	return resp[0] * 256 + resp[1];
@@ -901,7 +902,7 @@ int dns_init_resolvers(void)
 int dns_build_query(int query_id, int query_type, char *hostname_dn, int hostname_dn_len, char *buf, int bufsize)
 {
 	struct dns_header *dns;
-	struct dns_question *qinfo;
+	struct dns_question qinfo;
 	char *ptr, *bufend;
 
 	memset(buf, '\0', bufsize);
@@ -915,14 +916,7 @@ int dns_build_query(int query_id, int query_type, char *hostname_dn, int hostnam
 	/* set dns query headers */
 	dns = (struct dns_header *)ptr;
 	dns->id = (unsigned short) htons(query_id);
-	dns->qr = 0;			/* query */
-	dns->opcode = 0;
-	dns->aa = 0;
-	dns->tc = 0;
-	dns->rd = 1;			/* recursion desired */
-	dns->ra = 0;
-	dns->z = 0;
-	dns->rcode = 0;
+	dns->flags = htons(0x0100); /* qr=0, opcode=0, aa=0, tc=0, rd=1, ra=0, z=0, rcode=0 */
 	dns->qdcount = htons(1);	/* 1 question */
 	dns->ancount = 0;
 	dns->nscount = 0;
@@ -947,9 +941,9 @@ int dns_build_query(int query_id, int query_type, char *hostname_dn, int hostnam
 		return -1;
 
 	/* set up query info (type and class) */
-	qinfo = (struct dns_question *)ptr;
-	qinfo->qtype = htons(query_type);
-	qinfo->qclass = htons(DNS_RCLASS_IN);
+	qinfo.qtype = htons(query_type);
+	qinfo.qclass = htons(DNS_RCLASS_IN);
+	memcpy(ptr, &qinfo, sizeof(qinfo));
 
 	ptr += sizeof(struct dns_question);
 
@@ -1090,6 +1084,7 @@ struct task *dns_process_resolve(struct task *t)
 {
 	struct dns_resolvers *resolvers = t->context;
 	struct dns_resolution *resolution, *res_back;
+	int res_preferred_afinet, res_preferred_afinet6;
 
 	/* timeout occurs inevitably for the first element of the FIFO queue */
 	if (LIST_ISEMPTY(&resolvers->curr_resolution)) {
@@ -1114,21 +1109,32 @@ struct task *dns_process_resolve(struct task *t)
 
 			/* notify the result to the requester */
 			resolution->requester_error_cb(resolution, DNS_RESP_TIMEOUT);
+			goto out;
 		}
 
 		resolution->try -= 1;
 
-		/* check current resolution status */
-		if (resolution->step == RSLV_STEP_RUNNING) {
-			/* resend the DNS query */
-			dns_send_query(resolution);
+		res_preferred_afinet = resolution->resolver_family_priority == AF_INET && resolution->query_type == DNS_RTYPE_A;
+		res_preferred_afinet6 = resolution->resolver_family_priority == AF_INET6 && resolution->query_type == DNS_RTYPE_AAAA;
 
-			/* check if we have more than one resolution in the list */
-			if (dns_check_resolution_queue(resolvers) > 1) {
-				/* move the rsolution to the end of the list */
-				LIST_DEL(&resolution->list);
-				LIST_ADDQ(&resolvers->curr_resolution, &resolution->list);
-			}
+		/* let's change the query type if needed */
+		if (res_preferred_afinet6) {
+			/* fallback from AAAA to A */
+			resolution->query_type = DNS_RTYPE_A;
+		}
+		else if (res_preferred_afinet) {
+			/* fallback from A to AAAA */
+			resolution->query_type = DNS_RTYPE_AAAA;
+		}
+
+		/* resend the DNS query */
+		dns_send_query(resolution);
+
+		/* check if we have more than one resolution in the list */
+		if (dns_check_resolution_queue(resolvers) > 1) {
+			/* move the rsolution to the end of the list */
+			LIST_DEL(&resolution->list);
+			LIST_ADDQ(&resolvers->curr_resolution, &resolution->list);
 		}
 	}
 

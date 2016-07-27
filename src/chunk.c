@@ -17,6 +17,7 @@
 
 #include <common/config.h>
 #include <common/chunk.h>
+#include <common/standard.h>
 
 /* trash chunks used for various conversions */
 static struct chunk *trash_chunk;
@@ -60,8 +61,8 @@ struct chunk *get_trash_chunk(void)
 int alloc_trash_buffers(int bufsize)
 {
 	trash_size = bufsize;
-	trash_buf1 = (char *)realloc(trash_buf1, bufsize);
-	trash_buf2 = (char *)realloc(trash_buf2, bufsize);
+	trash_buf1 = (char *)my_realloc2(trash_buf1, bufsize);
+	trash_buf2 = (char *)my_realloc2(trash_buf2, bufsize);
 	return trash_buf1 && trash_buf2;
 }
 
@@ -111,7 +112,7 @@ int chunk_appendf(struct chunk *chk, const char *fmt, ...)
 	va_list argp;
 	int ret;
 
-	if (!chk->str || !chk->size)
+	if (chk->len < 0 || !chk->str || !chk->size)
 		return 0;
 
 	va_start(argp, fmt);
@@ -135,6 +136,9 @@ int chunk_htmlencode(struct chunk *dst, struct chunk *src)
 	int i, l;
 	int olen, free;
 	char c;
+
+	if (dst->len < 0)
+		return dst->len;
 
 	olen = dst->len;
 
@@ -176,6 +180,9 @@ int chunk_asciiencode(struct chunk *dst, struct chunk *src, char qc)
 	int i, l;
 	int olen, free;
 	char c;
+
+	if (dst->len < 0)
+		return dst->len;
 
 	olen = dst->len;
 
