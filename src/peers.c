@@ -225,7 +225,7 @@ uint64_t intdecode(char **str, char *end) {
 		}
 		i += (uint64_t)msg[idx] <<  (4 + 7*(idx-1));
 	}
-	while (msg[idx] > 128);
+	while (msg[idx] >= 128);
 	*str = (char *)&msg[idx+1];
 	return i;
 }
@@ -886,6 +886,7 @@ switchstate:
 						curpeer->confirm++;
 					}
 					else if (msg_head[1] == PEER_MSG_CTRL_RESYNCCONFIRM)  {
+						struct shared_table *st;
 
 						/* If stopping state */
 						if (stopping) {
@@ -893,6 +894,10 @@ switchstate:
 							curpeer->flags |= PEER_F_TEACH_COMPLETE;
 							appctx->st0 = PEER_SESS_ST_END;
 							goto switchstate;
+						}
+						for (st = curpeer->tables; st; st = st->next) {
+							st->update = st->last_pushed = st->teaching_origin;
+							st->flags = 0;
 						}
 
 						 /* reset teaching flags to 0 */
@@ -1224,25 +1229,6 @@ incomplete:
 				}
 
 
-				/* Confirm finished or partial messages */
-				while (curpeer->confirm) {
-					unsigned char msg[2];
-
-					/* There is a confirm messages to send */
-					msg[0] = PEER_MSG_CLASS_CONTROL;
-					msg[1] = PEER_MSG_CTRL_RESYNCCONFIRM;
-
-					/* message to buffer */
-					repl = bi_putblk(si_ic(si), (char *)msg, sizeof(msg));
-					if (repl <= 0) {
-						/* no more write possible */
-						if (repl == -1)
-							goto full;
-						appctx->st0 = PEER_SESS_ST_END;
-						goto switchstate;
-					}
-					curpeer->confirm--;
-				}
 
 
 				/* Need to request a resync */
@@ -1491,9 +1477,6 @@ incomplete:
 									/* push local updates */
 									if (!eb || eb->key > st->teaching_origin) {
 										st->flags |= SHTABLE_F_TEACH_STAGE2;
-										eb = eb32_first(&st->table->updates);
-										if (eb)
-											st->last_pushed = eb->key - 1;
 										break;
 									}
 
@@ -1548,6 +1531,26 @@ incomplete:
 					}
 					/* flag finished message sent */
 					curpeer->flags |= PEER_F_TEACH_FINISHED;
+				}
+
+				/* Confirm finished or partial messages */
+				while (curpeer->confirm) {
+					unsigned char msg[2];
+
+					/* There is a confirm messages to send */
+					msg[0] = PEER_MSG_CLASS_CONTROL;
+					msg[1] = PEER_MSG_CTRL_RESYNCCONFIRM;
+
+					/* message to buffer */
+					repl = bi_putblk(si_ic(si), (char *)msg, sizeof(msg));
+					if (repl <= 0) {
+						/* no more write possible */
+						if (repl == -1)
+							goto full;
+						appctx->st0 = PEER_SESS_ST_END;
+						goto switchstate;
+					}
+					curpeer->confirm--;
 				}
 
 				/* noting more to do */

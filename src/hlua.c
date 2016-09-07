@@ -4164,6 +4164,10 @@ __LJMP static int hlua_http_get_headers(lua_State *L, struct hlua_txn *htxn, str
 	if (!htxn->s->txn)
 		return 1;
 
+	/* Check if a valid response is parsed */
+	if (unlikely(msg->msg_state < HTTP_MSG_BODY))
+		return 1;
+
 	/* Build array of headers. */
 	old_idx = 0;
 	cur_next = msg->chn->buf->p + hdr_idx_first_pos(&htxn->s->txn->hdr_idx);
@@ -4278,6 +4282,10 @@ __LJMP static inline int hlua_http_rep_hdr(lua_State *L, struct hlua_txn *htxn,
 	const char *value = MAY_LJMP(luaL_checkstring(L, 4));
 	struct my_regex re;
 
+	/* Check if a valid response is parsed */
+	if (unlikely(msg->msg_state < HTTP_MSG_BODY))
+		return 0;
+
 	if (!regex_comp(reg, &re, 1, 1, NULL))
 		WILL_LJMP(luaL_argerror(L, 3, "invalid regex"));
 
@@ -4336,6 +4344,10 @@ __LJMP static inline int hlua_http_del_hdr(lua_State *L, struct hlua_txn *htxn, 
 	struct hdr_ctx ctx;
 	struct http_txn *txn = htxn->s->txn;
 
+	/* Check if a valid response is parsed */
+	if (unlikely(msg->msg_state < HTTP_MSG_BODY))
+		return 0;
+
 	ctx.idx = 0;
 	while (http_find_header2(name, len, msg->chn->buf->p, &txn->hdr_idx, &ctx))
 		http_remove_header2(msg, &txn->hdr_idx, &ctx);
@@ -4372,6 +4384,10 @@ __LJMP static inline int hlua_http_add_hdr(lua_State *L, struct hlua_txn *htxn, 
 	size_t value_len;
 	const char *value = MAY_LJMP(luaL_checklstring(L, 3, &value_len));
 	char *p;
+
+	/* Check if a valid message is parsed */
+	if (unlikely(msg->msg_state < HTTP_MSG_BODY))
+		return 0;
 
 	/* Check length. */
 	trash.len = value_len + name_len + 2;
@@ -4443,6 +4459,12 @@ static int hlua_http_req_set_meth(lua_State *L)
 	size_t name_len;
 	const char *name = MAY_LJMP(luaL_checklstring(L, 2, &name_len));
 
+	/* Check if a valid request is parsed */
+	if (unlikely(htxn->s->txn->req.msg_state < HTTP_MSG_BODY)) {
+		lua_pushboolean(L, 0);
+		return 1;
+	}
+
 	lua_pushboolean(L, http_replace_req_line(0, name, name_len, htxn->p, htxn->s) != -1);
 	return 1;
 }
@@ -4453,6 +4475,13 @@ static int hlua_http_req_set_path(lua_State *L)
 	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
 	size_t name_len;
 	const char *name = MAY_LJMP(luaL_checklstring(L, 2, &name_len));
+
+	/* Check if a valid request is parsed */
+	if (unlikely(htxn->s->txn->req.msg_state < HTTP_MSG_BODY)) {
+		lua_pushboolean(L, 0);
+		return 1;
+	}
+
 	lua_pushboolean(L, http_replace_req_line(1, name, name_len, htxn->p, htxn->s) != -1);
 	return 1;
 }
@@ -4463,6 +4492,12 @@ static int hlua_http_req_set_query(lua_State *L)
 	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
 	size_t name_len;
 	const char *name = MAY_LJMP(luaL_checklstring(L, 2, &name_len));
+
+	/* Check if a valid request is parsed */
+	if (unlikely(htxn->s->txn->req.msg_state < HTTP_MSG_BODY)) {
+		lua_pushboolean(L, 0);
+		return 1;
+	}
 
 	/* Check length. */
 	if (name_len > trash.size - 1) {
@@ -4487,6 +4522,12 @@ static int hlua_http_req_set_uri(lua_State *L)
 	size_t name_len;
 	const char *name = MAY_LJMP(luaL_checklstring(L, 2, &name_len));
 
+	/* Check if a valid request is parsed */
+	if (unlikely(htxn->s->txn->req.msg_state < HTTP_MSG_BODY)) {
+		lua_pushboolean(L, 0);
+		return 1;
+	}
+
 	lua_pushboolean(L, http_replace_req_line(3, name, name_len, htxn->p, htxn->s) != -1);
 	return 1;
 }
@@ -4496,6 +4537,10 @@ static int hlua_http_res_set_status(lua_State *L)
 {
 	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
 	unsigned int code = MAY_LJMP(luaL_checkinteger(L, 2));
+
+	/* Check if a valid response is parsed */
+	if (unlikely(htxn->s->txn->rsp.msg_state < HTTP_MSG_BODY))
+		return 0;
 
 	http_set_status(code, htxn->s);
 	return 0;
@@ -4610,7 +4655,7 @@ __LJMP static int hlua_get_priv(lua_State *L)
  * return 0 if the stack does not contains free slots,
  * otherwise it returns 1.
  */
-static int hlua_txn_new(lua_State *L, struct stream *s, struct proxy *p, int dir)
+static int hlua_txn_new(lua_State *L, struct stream *s, struct proxy *p, int dir, int flags)
 {
 	struct hlua_txn *htxn;
 
@@ -4630,6 +4675,7 @@ static int hlua_txn_new(lua_State *L, struct stream *s, struct proxy *p, int dir
 	htxn->s = s;
 	htxn->p = p;
 	htxn->dir = dir;
+	htxn->flags = flags;
 
 	/* Create the "f" field that contains a list of fetches. */
 	lua_pushstring(L, "f");
@@ -4818,10 +4864,21 @@ __LJMP static int hlua_txn_set_mark(lua_State *L)
 __LJMP static int hlua_txn_done(lua_State *L)
 {
 	struct hlua_txn *htxn;
+	struct hlua *hlua;
 	struct channel *ic, *oc;
 
 	MAY_LJMP(check_args(L, 1, "close"));
 	htxn = MAY_LJMP(hlua_checktxn(L, 1));
+	hlua = hlua_gethlua(L);
+
+	/* If the flags NOTERM is set, we cannot terminate the http
+	 * session, so we just end the execution of the current
+	 * lua code.
+	 */
+	if (htxn->flags & HLUA_TXN_NOTERM) {
+		WILL_LJMP(hlua_done(L));
+		return 0;
+	}
 
 	ic = &htxn->s->req;
 	oc = &htxn->s->res;
@@ -4856,6 +4913,7 @@ __LJMP static int hlua_txn_done(lua_State *L)
 
 	ic->analysers = 0;
 
+	hlua->flags |= HLUA_STOP;
 	WILL_LJMP(hlua_done(L));
 	return 0;
 }
@@ -5264,7 +5322,8 @@ static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp
 		lua_rawgeti(stream->hlua.T, LUA_REGISTRYINDEX, fcn->function_ref);
 
 		/* push arguments in the stack. */
-		if (!hlua_txn_new(stream->hlua.T, stream, smp->px, smp->opt & SMP_OPT_DIR)) {
+		if (!hlua_txn_new(stream->hlua.T, stream, smp->px, smp->opt & SMP_OPT_DIR,
+		                  HLUA_TXN_NOTERM)) {
 			SEND_ERR(smp->px, "Lua sample-fetch '%s': full stack.\n", fcn->name);
 			RESET_SAFE_LJMP(stream->hlua.T);
 			return 0;
@@ -5505,7 +5564,7 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 		lua_rawgeti(s->hlua.T, LUA_REGISTRYINDEX, rule->arg.hlua_rule->fcn.function_ref);
 
 		/* Create and and push object stream in the stack. */
-		if (!hlua_txn_new(s->hlua.T, s, px, dir)) {
+		if (!hlua_txn_new(s->hlua.T, s, px, dir, 0)) {
 			SEND_ERR(px, "Lua function '%s': full stack.\n",
 			         rule->arg.hlua_rule->fcn.name);
 			RESET_SAFE_LJMP(s->hlua.T);
@@ -5538,6 +5597,8 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 	case HLUA_E_OK:
 		if (!hlua_check_proto(s, dir))
 			return ACT_RET_ERR;
+		if (s->hlua.flags & HLUA_STOP)
+			return ACT_RET_STOP;
 		return ACT_RET_CONT;
 
 	/* yield. */

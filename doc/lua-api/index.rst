@@ -856,32 +856,6 @@ HTTP class
   :param string replace: The replacement value.
   :see: HTTP.req_replace_header()
 
-.. js:function:: HTTP.req_replace_value(http, name, regex, replace)
-
-  Works like "HTTP.req_replace_header()" except that it matches the regex
-  against every comma-delimited value of the header field "name" instead of the
-  entire header.
-
-  :param class_http http: The related http object.
-  :param string name: The header name.
-  :param string regex: The match regular expression.
-  :param string replace: The replacement value.
-  :see: HTTP.req_replace_header()
-  :see: HTTP.res_replace_value()
-
-.. js:function:: HTTP.res_replace_value(http, name, regex, replace)
-
-  Works like "HTTP.res_replace_header()" except that it matches the regex
-  against every comma-delimited value of the header field "name" instead of the
-  entire header.
-
-  :param class_http http: The related http object.
-  :param string name: The header name.
-  :param string regex: The match regular expression.
-  :param string replace: The replacement value.
-  :see: HTTP.res_replace_header()
-  :see: HTTP.req_replace_value()
-
 .. js:function:: HTTP.req_set_method(http, method)
 
   Rewrites the request method with the parameter "method".
@@ -1099,6 +1073,11 @@ TXN class
   This function terminates processing of the transaction and the associated
   session. It can be used when a critical error is detected or to terminate
   processing after some data have been returned to the client (eg: a redirect).
+
+  *Warning*: It not make sense to call this function from sample-fetches. In
+  this case the behaviour of this one is the same than core.done(): it quit
+  the Lua execution. The transaction is really aborted only from an action
+  registered function.
 
   :param class_txn txn: The class txn object containing the data.
 
