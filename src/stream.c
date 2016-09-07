@@ -547,7 +547,6 @@ static int sess_update_st_con_tcp(struct stream *s)
 	struct stream_interface *si = &s->si[1];
 	struct channel *req = &s->req;
 	struct channel *rep = &s->res;
-	struct connection *srv_conn = __objt_conn(si->end);
 
 	/* If we got an error, or if nothing happened and the connection timed
 	 * out, we must give up. The CER state handler will take care of retry
@@ -567,7 +566,8 @@ static int sess_update_st_con_tcp(struct stream *s)
 		si->exp   = TICK_ETERNITY;
 		si->state = SI_ST_CER;
 
-		conn_force_close(srv_conn);
+		si_release_endpoint(si);
+		s->flags &= ~SF_ADDR_SET;
 
 		if (si->err_type)
 			return 0;
@@ -3297,7 +3297,7 @@ smp_fetch_sc_trackers(const struct arg *args, struct sample *smp, const char *kw
 
 	smp->flags = SMP_F_VOL_TEST;
 	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = stkctr_entry(stkctr)->ref_cnt;
+	smp->data.u.sint = stkctr_entry(stkctr) ? stkctr_entry(stkctr)->ref_cnt : 0;
 	return 1;
 }
 
