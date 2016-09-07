@@ -1,3 +1,9 @@
+haproxy (1:1.6.9-1) unstable; urgency=medium
+
+  * Upstream release haproxy 1.6.9
+
+ -- vnz <vincent.leraitre@teads.tv>  Wed, 07 Sep 2016 12:00:36 +0200
+
 haproxy (1:1.6.7-1) unstable; urgency=medium
 
   * Upstream release haproxy 1.6.7
